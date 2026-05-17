@@ -1,21 +1,22 @@
-# Nginx Restart Access
+# Nginx Logs And Restart Access
 
 This example exposes a DPP Unix socket for clients that should only be able to
-restart selected nginx containers.
+read nginx container output and restart the nginx container.
 
 The nginx container opts in with container-local DPP labels:
 
 ```text
-dpp.rule.restart.action=restart
-dpp.rule.restart.match=*
+dpp.rule.self.action=logs,restart
+dpp.rule.self.match=*
 ```
 
 The proxy rules allow:
 
+- `logs` for this nginx container's output
 - `restart` for this nginx container
 
-The rules do not allow inspect, logs, exec, start, stop, remove, image changes,
-or other Docker API actions.
+The rules do not allow inspect, exec, start, stop, remove, image changes, or
+other Docker API actions.
 
 The DPP service only sets `DPP_LISTEN` and `DPP_DEFAULT`; the permission rule is
 declared on the nginx container itself.

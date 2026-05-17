@@ -18,10 +18,11 @@ import (
 
 // ContainerMeta holds the subset of container inspect data we need for matching.
 type ContainerMeta struct {
-	ID     string
-	Name   string
-	Image  string
-	Labels map[string]string
+	ID          string
+	Name        string
+	Image       string
+	Labels      map[string]string
+	DefaultUser string
 }
 
 // Engine is the authorization engine that evaluates rules against requests.
@@ -214,7 +215,7 @@ func (e *Engine) ruleAllows(rule *config.Rule, meta *ContainerMeta, body map[str
 	}
 
 	if class.Action == "exec" && !isExecFollowup {
-		return e.checkExecUser(rule, body)
+		return e.checkExecUser(rule, meta, body)
 	}
 
 	return true
@@ -302,16 +303,20 @@ func (e *Engine) matchCreateBody(rule *config.Rule, body map[string]interface{})
 }
 
 // checkExecUser validates the exec body's User field against the rule.
-func (e *Engine) checkExecUser(rule *config.Rule, body map[string]interface{}) bool {
+func (e *Engine) checkExecUser(rule *config.Rule, meta *ContainerMeta, body map[string]interface{}) bool {
 	if body == nil {
 		return false
 	}
 
 	user, _ := body["User"].(string)
 
-	// Reject empty/missing User field (would inherit container default — usually root)
+	// Empty/missing User inherits Docker's configured container user. Only allow
+	// that inheritance when inspect exposes a safe, explicit non-root default.
 	if user == "" {
-		return false
+		if meta == nil || meta.DefaultUser == "" {
+			return false
+		}
+		user = meta.DefaultUser
 	}
 
 	// Parse user:group format. Docker accepts both names and numeric IDs.
@@ -381,6 +386,7 @@ func (e *Engine) inspectContainer(id string) (*ContainerMeta, error) {
 		Config struct {
 			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
+			User   string            `json:"User"`
 		} `json:"Config"`
 	}
 	if err := json.Unmarshal(bodyBytes, &data); err != nil {
@@ -388,10 +394,11 @@ func (e *Engine) inspectContainer(id string) (*ContainerMeta, error) {
 	}
 
 	return &ContainerMeta{
-		ID:     data.ID,
-		Name:   data.Name,
-		Image:  data.Config.Image,
-		Labels: data.Config.Labels,
+		ID:          data.ID,
+		Name:        data.Name,
+		Image:       data.Config.Image,
+		Labels:      data.Config.Labels,
+		DefaultUser: data.Config.User,
 	}, nil
 }
 

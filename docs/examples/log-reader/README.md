@@ -6,8 +6,8 @@ container logs.
 The app container opts in with container-local DPP labels:
 
 ```text
-dpp.rule.logs.action=logs
-dpp.rule.logs.match=*
+dpp.rule.self.action=logs
+dpp.rule.self.match=*
 ```
 
 The proxy rules allow:

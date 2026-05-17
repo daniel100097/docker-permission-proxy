@@ -378,6 +378,7 @@ func TestEngine_ExecUserExact(t *testing.T) {
 			"Config": map[string]interface{}{
 				"Image":  "myapp",
 				"Labels": map[string]interface{}{"team": "dev"},
+				"User":   "1000",
 			},
 		},
 	}
@@ -403,11 +404,11 @@ func TestEngine_ExecUserExact(t *testing.T) {
 		t.Error("expected deny for wrong exec user (root)")
 	}
 
-	// Empty user
+	// Empty user inherits the container's configured default user.
 	body = []byte(`{"Cmd": ["sh"]}`)
 	decision = e.Authorize(req, class, body)
-	if decision.Allowed {
-		t.Error("expected deny for empty exec user")
+	if !decision.Allowed {
+		t.Errorf("expected allow for inherited exec user, got: %s", decision.Reason)
 	}
 
 	// Exact user requires full string match, not just the user component
@@ -417,11 +418,11 @@ func TestEngine_ExecUserExact(t *testing.T) {
 		t.Error("expected deny when exact exec user does not match full user:group string")
 	}
 
-	// Missing user field entirely
+	// Empty string user also inherits the container's configured default user.
 	body = []byte(`{"User": "", "Cmd": ["sh"]}`)
 	decision = e.Authorize(req, class, body)
-	if decision.Allowed {
-		t.Error("expected deny for empty string user")
+	if !decision.Allowed {
+		t.Errorf("expected allow for empty string inherited exec user, got: %s", decision.Reason)
 	}
 }
 
@@ -469,6 +470,108 @@ func TestEngine_ExecUserAllow(t *testing.T) {
 		if decision.Allowed {
 			t.Errorf("expected deny for user %s", user)
 		}
+	}
+}
+
+func TestEngine_ExecUserInheritsConfiguredDefaultUser(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:          "devexec",
+		Actions:       map[string]bool{"exec": true},
+		Targets:       map[string]bool{"container": true},
+		MatchAny:      true,
+		ExecUserAllow: map[string]bool{"1000": true, "node": true},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"numeric": {
+			"Id":   "numericfull",
+			"Name": "/numeric-container",
+			"Config": map[string]interface{}{
+				"Image":  "node",
+				"Labels": map[string]interface{}{},
+				"User":   "1000:1000",
+			},
+		},
+		"named": {
+			"Id":   "namedfull",
+			"Name": "/named-container",
+			"Config": map[string]interface{}{
+				"Image":  "node",
+				"Labels": map[string]interface{}{},
+				"User":   "node",
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	for _, id := range []string{"numeric", "named"} {
+		t.Run(id, func(t *testing.T) {
+			class := classifier.Classification{Action: "exec", Target: "container", ID: id}
+			req := httptest.NewRequest("POST", "/containers/"+id+"/exec", nil)
+			decision := e.Authorize(req, class, []byte(`{"Cmd":["sh"]}`))
+			if !decision.Allowed {
+				t.Errorf("expected allow for inherited default user on %s, got: %s", id, decision.Reason)
+			}
+		})
+	}
+}
+
+func TestEngine_ExecUserDoesNotInheritEmptyOrRootDefaultUser(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:          "devexec",
+		Actions:       map[string]bool{"exec": true},
+		Targets:       map[string]bool{"container": true},
+		MatchAny:      true,
+		ExecUserAllow: map[string]bool{"root": true, "0": true, "1000": true},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"empty": {
+			"Id":   "emptyfull",
+			"Name": "/empty-container",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+		"root": {
+			"Id":   "rootfull",
+			"Name": "/root-container",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+				"User":   "root",
+			},
+		},
+		"uid0": {
+			"Id":   "uid0full",
+			"Name": "/uid0-container",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+				"User":   "1000:0",
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	for _, id := range []string{"empty", "root", "uid0"} {
+		t.Run(id, func(t *testing.T) {
+			class := classifier.Classification{Action: "exec", Target: "container", ID: id}
+			req := httptest.NewRequest("POST", "/containers/"+id+"/exec", nil)
+			decision := e.Authorize(req, class, []byte(`{"Cmd":["sh"]}`))
+			if decision.Allowed {
+				t.Errorf("expected deny for inherited unsafe default user on %s", id)
+			}
+		})
 	}
 }
 
@@ -843,6 +946,7 @@ func TestEngine_ContainerLabelRuleRequiresExecUser(t *testing.T) {
 					"dpp.rule.shell.match":           "*",
 					"dpp.rule.shell.exec-user-allow": "1000,deploy",
 				},
+				"User": "1000:1000",
 			},
 		},
 	}
@@ -863,6 +967,11 @@ func TestEngine_ContainerLabelRuleRequiresExecUser(t *testing.T) {
 	decision = e.Authorize(req, class, []byte(`{"User":"root","Cmd":["sh"]}`))
 	if decision.Allowed {
 		t.Error("expected label-defined exec rule to keep blocking root")
+	}
+
+	decision = e.Authorize(req, class, []byte(`{"Cmd":["sh"]}`))
+	if !decision.Allowed {
+		t.Errorf("expected label-defined exec rule to allow inherited default user, got: %s", decision.Reason)
 	}
 }
 

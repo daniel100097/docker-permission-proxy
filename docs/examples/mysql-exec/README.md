@@ -6,15 +6,16 @@ MySQL container without also granting `inspect`.
 The MySQL container opts in with container-local DPP labels:
 
 ```text
-dpp.rule.exec.action=exec
-dpp.rule.exec.match=*
-dpp.rule.exec.exec-user-allow=mysql,1000
+dpp.rule.self.action=exec
+dpp.rule.self.match=*
+dpp.rule.self.exec-user-allow=mysql,1000
 ```
 
 The proxy rules allow:
 
 - `exec` into this MySQL container
 - exec users `mysql` and `1000`
+- omitted exec users when Docker inspect reports the container default user as `mysql`
 - follow-up exec start, resize, and inspect calls for exec sessions created by DPP
 
 The rules do not allow Docker container inspect, logs, restart, stop, remove, or
@@ -22,6 +23,11 @@ other Docker API actions.
 
 The DPP service only sets `DPP_LISTEN` and `DPP_DEFAULT`; the permission rule is
 declared on the MySQL container itself.
+
+The MySQL service sets `user: mysql`, so Docker inspect exposes a non-root
+default user. That lets clients run `docker compose exec mysql sh` without `-u`.
+If a container has no configured default user, DPP still rejects exec requests
+that omit `User` because Docker would run them as root.
 
 Run it with:
 

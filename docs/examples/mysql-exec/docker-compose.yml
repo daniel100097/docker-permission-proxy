@@ -5,12 +5,13 @@
 services:
   mysql:
     image: mysql:8
+    user: mysql
     environment:
       MYSQL_ROOT_PASSWORD: example
     labels:
-      dpp.rule.exec.action: exec
-      dpp.rule.exec.match: "*"
-      dpp.rule.exec.exec-user-allow: mysql,1000
+      dpp.rule.self.action: exec
+      dpp.rule.self.match: "*"
+      dpp.rule.self.exec-user-allow: mysql,1000
 
   mysql-shell-proxy:
     image: ghcr.io/daniel100097/docker-permission-proxy:main

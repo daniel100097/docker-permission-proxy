@@ -1,11 +1,11 @@
-# Allows only docker restart for nginx through a container-local DPP rule label.
+# Allows docker logs and restart for nginx through a container-local DPP rule label.
 
 services:
   nginx:
     image: nginx:alpine
     labels:
-      dpp.rule.restart.action: restart
-      dpp.rule.restart.match: "*"
+      dpp.rule.self.action: logs,restart
+      dpp.rule.self.match: "*"
 
   nginx-restart-proxy:
     image: ghcr.io/daniel100097/docker-permission-proxy:main

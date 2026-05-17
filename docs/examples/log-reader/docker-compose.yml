@@ -6,8 +6,8 @@ services:
   app:
     image: nginx:alpine
     labels:
-      dpp.rule.logs.action: logs
-      dpp.rule.logs.match: "*"
+      dpp.rule.self.action: logs
+      dpp.rule.self.match: "*"
 
   docker-log-proxy:
     image: ghcr.io/daniel100097/docker-permission-proxy:main

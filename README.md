@@ -271,7 +271,10 @@ Exec is intentionally stricter than other actions:
 
 - `exec` always requires an explicit matching rule.
 - `DPP_DEFAULT=allow` does not allow exec.
-- Missing or empty Docker exec `User` is rejected.
+- Missing or empty Docker exec `User` inherits the container's configured
+  `Config.User` from inspect only when that value is explicit and non-root.
+- If the container has no configured default user, missing or empty Docker exec
+  `User` is rejected because Docker would run the exec as root.
 - `root`, `0`, `root:*`, `0:*`, `*:root`, and `*:0` are rejected.
 - `EXEC_USER` requires the full `User` string to match exactly.
 - `EXEC_USER_ALLOW` checks the user component before `:` and still rejects root user/group.
@@ -289,6 +292,10 @@ DPP_RULE_deployexec_ACTION=exec
 DPP_RULE_deployexec_MATCH_NAME=deploy-*
 DPP_RULE_deployexec_EXEC_USER=deploy
 ```
+
+With an image or Compose service that sets `USER node` / `user: "1000:1000"`,
+`docker compose exec api sh` can pass the same rule as `docker compose exec -u
+1000:1000 api sh`. Images that leave `Config.User` empty still require `-u`.
 
 Allowed follow-up requests (`exec.start`, `exec.resize`, `exec.inspect`) are
 resolved through the exec-ID cache populated by the original `exec` create
