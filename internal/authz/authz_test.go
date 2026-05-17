@@ -788,6 +788,490 @@ func TestEngine_ActionMismatch_Denied(t *testing.T) {
 	}
 }
 
+func TestEngine_ContainerLabelRuleScopedToLabeledContainer(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"labeled": {
+			"Id":   "labeledfull",
+			"Name": "/labeled-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.self.action": "restart",
+					"dpp.rule.self.match":  "*",
+				},
+			},
+		},
+		"other": {
+			"Id":   "otherfull",
+			"Name": "/other-app",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "labeled"}
+	req := httptest.NewRequest("POST", "/containers/labeled/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.Allowed {
+		t.Errorf("expected labeled container rule to allow restart, got: %s", decision.Reason)
+	}
+
+	class = classifier.Classification{Action: "restart", Target: "container", ID: "other"}
+	req = httptest.NewRequest("POST", "/containers/other/restart", nil)
+	decision = e.Authorize(req, class, nil)
+	if decision.Allowed {
+		t.Error("expected container label rule to apply only to the labeled container")
+	}
+}
+
+func TestEngine_ContainerLabelRuleRequiresExecUser(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"shell": {
+			"Id":   "shellfull",
+			"Name": "/shell-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.shell.action":          "exec",
+					"dpp.rule.shell.match":           "*",
+					"dpp.rule.shell.exec-user-allow": "1000,deploy",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "exec", Target: "container", ID: "shell"}
+	req := httptest.NewRequest("POST", "/containers/shell/exec", nil)
+
+	decision := e.Authorize(req, class, []byte(`{"User":"1000","Cmd":["sh"]}`))
+	if !decision.Allowed {
+		t.Errorf("expected label-defined exec rule to allow user 1000, got: %s", decision.Reason)
+	}
+
+	decision = e.Authorize(req, class, []byte(`{"User":"root","Cmd":["sh"]}`))
+	if decision.Allowed {
+		t.Error("expected label-defined exec rule to keep blocking root")
+	}
+}
+
+func TestEngine_InvalidContainerLabelRuleDoesNotBlockEnvRule(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:        "devrestart",
+		Actions:     map[string]bool{"restart": true},
+		Targets:     map[string]bool{"container": true},
+		MatchLabels: map[string]string{"team": "dev"},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/dev-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"team":                "dev",
+					"dpp.rule.bad.action": "restart",
+					"dpp.rule.bad.acton":  "stop",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.Allowed {
+		t.Errorf("expected env rule to allow despite invalid label rule, got: %s", decision.Reason)
+	}
+}
+
+func TestEngine_ContainerLabelRuleSelectorsAreANDed(t *testing.T) {
+	ruleLabels := map[string]interface{}{
+		"dpp.rule.strict.action":          "restart",
+		"dpp.rule.strict.match-name":      "web-*",
+		"dpp.rule.strict.match-image":     "registry.acme.io/*",
+		"dpp.rule.strict.match-id":        "abc123",
+		"dpp.rule.strict.match-label.env": "prod",
+	}
+
+	containers := map[string]map[string]interface{}{
+		"match": {
+			"Id":   "abc123match",
+			"Name": "/web-01",
+			"Config": map[string]interface{}{
+				"Image":  "registry.acme.io/web:latest",
+				"Labels": mergeLabels(ruleLabels, map[string]interface{}{"env": "prod"}),
+			},
+		},
+		"badname": {
+			"Id":   "abc123badname",
+			"Name": "/api-01",
+			"Config": map[string]interface{}{
+				"Image":  "registry.acme.io/web:latest",
+				"Labels": mergeLabels(ruleLabels, map[string]interface{}{"env": "prod"}),
+			},
+		},
+		"badimage": {
+			"Id":   "abc123badimage",
+			"Name": "/web-02",
+			"Config": map[string]interface{}{
+				"Image":  "docker.io/library/nginx:latest",
+				"Labels": mergeLabels(ruleLabels, map[string]interface{}{"env": "prod"}),
+			},
+		},
+		"badid": {
+			"Id":   "def456badid",
+			"Name": "/web-03",
+			"Config": map[string]interface{}{
+				"Image":  "registry.acme.io/web:latest",
+				"Labels": mergeLabels(ruleLabels, map[string]interface{}{"env": "prod"}),
+			},
+		},
+		"badlabel": {
+			"Id":   "abc123badlabel",
+			"Name": "/web-04",
+			"Config": map[string]interface{}{
+				"Image":  "registry.acme.io/web:latest",
+				"Labels": mergeLabels(ruleLabels, map[string]interface{}{"env": "staging"}),
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	tests := []struct {
+		id      string
+		allowed bool
+	}{
+		{id: "match", allowed: true},
+		{id: "badname", allowed: false},
+		{id: "badimage", allowed: false},
+		{id: "badid", allowed: false},
+		{id: "badlabel", allowed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			class := classifier.Classification{Action: "restart", Target: "container", ID: tt.id}
+			req := httptest.NewRequest("POST", "/containers/"+tt.id+"/restart", nil)
+			decision := e.Authorize(req, class, nil)
+			if decision.Allowed != tt.allowed {
+				t.Fatalf("allowed = %v, want %v; reason: %s", decision.Allowed, tt.allowed, decision.Reason)
+			}
+		})
+	}
+}
+
+func TestEngine_ContainerLabelRuleActionMismatchDenied(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.self.action": "stop",
+					"dpp.rule.self.match":  "*",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if decision.Allowed {
+		t.Error("expected deny when label rule action does not match request action")
+	}
+}
+
+func TestEngine_ContainerLabelRuleTargetMismatchDenied(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.self.action": "restart",
+					"dpp.rule.self.target": "image",
+					"dpp.rule.self.match":  "*",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if decision.Allowed {
+		t.Error("expected deny when label rule target does not match request target")
+	}
+}
+
+func TestEngine_ContainerLabelRuleCanAllowWhenStaticRuleMisses(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:        "prodrestart",
+		Actions:     map[string]bool{"restart": true},
+		Targets:     map[string]bool{"container": true},
+		MatchLabels: map[string]string{"team": "prod"},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/dev-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"team":                 "dev",
+					"dpp.rule.self.action": "restart",
+					"dpp.rule.self.match":  "*",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.Allowed {
+		t.Errorf("expected label rule to allow after static rule misses, got: %s", decision.Reason)
+	}
+}
+
+func TestEngine_ContainerLabelRuleWithNoActionDoesNotAuthorize(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.noop.match": "*",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if decision.Allowed {
+		t.Error("expected label rule without action to be ignored")
+	}
+}
+
+func TestEngine_InvalidContainerLabelRuleDeniesWhenNoRuleAllows(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.bad.action": "restart",
+					"dpp.rule.bad.acton":  "stop",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if decision.Allowed {
+		t.Fatal("expected invalid label rule to deny when no rule allows")
+	}
+	if !strings.Contains(decision.Reason, "invalid container label rule") {
+		t.Fatalf("expected invalid label rule reason, got: %s", decision.Reason)
+	}
+}
+
+func TestEngine_InvalidContainerLabelRuleDeniesAfterStaticRulesMiss(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:        "prodrestart",
+		Actions:     map[string]bool{"restart": true},
+		Targets:     map[string]bool{"container": true},
+		MatchLabels: map[string]string{"team": "prod"},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/dev-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"team":                "dev",
+					"dpp.rule.bad.action": "restart",
+					"dpp.rule.bad.acton":  "stop",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if decision.Allowed {
+		t.Fatal("expected invalid label rule to deny after static rules miss")
+	}
+	if !strings.Contains(decision.Reason, "invalid container label rule") {
+		t.Fatalf("expected invalid label rule reason, got: %s", decision.Reason)
+	}
+}
+
+func TestEngine_ContainerLabelExecRuleExactUser(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"shell": {
+			"Id":   "shellfull",
+			"Name": "/shell-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.shell.action":    "exec",
+					"dpp.rule.shell.match":     "*",
+					"dpp.rule.shell.exec-user": "deploy:deploy",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "exec", Target: "container", ID: "shell"}
+	req := httptest.NewRequest("POST", "/containers/shell/exec", nil)
+
+	decision := e.Authorize(req, class, []byte(`{"User":"deploy:deploy","Cmd":["sh"]}`))
+	if !decision.Allowed {
+		t.Errorf("expected label-defined exec rule to allow exact user, got: %s", decision.Reason)
+	}
+
+	decision = e.Authorize(req, class, []byte(`{"User":"deploy","Cmd":["sh"]}`))
+	if decision.Allowed {
+		t.Error("expected exact label-defined exec user to require full user:group match")
+	}
+}
+
+func TestEngine_ContainerLabelExecRuleWithoutUserConfigDenied(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"shell": {
+			"Id":   "shellfull",
+			"Name": "/shell-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.shell.action": "exec",
+					"dpp.rule.shell.match":  "*",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "exec", Target: "container", ID: "shell"}
+	req := httptest.NewRequest("POST", "/containers/shell/exec", nil)
+	decision := e.Authorize(req, class, []byte(`{"User":"1000","Cmd":["sh"]}`))
+	if decision.Allowed {
+		t.Error("expected label-defined exec rule without user config to deny")
+	}
+}
+
+func TestEngine_ContainerLabelExecRuleAllowsFollowup(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"shell": {
+			"Id":   "shellfull",
+			"Name": "/shell-app",
+			"Config": map[string]interface{}{
+				"Image": "myapp",
+				"Labels": map[string]interface{}{
+					"dpp.rule.shell.action":          "exec",
+					"dpp.rule.shell.match":           "*",
+					"dpp.rule.shell.exec-user-allow": "1000",
+				},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	createClass := classifier.Classification{Action: "exec", Target: "container", ID: "shell"}
+	createReq := httptest.NewRequest("POST", "/containers/shell/exec", nil)
+	createDecision := e.Authorize(createReq, createClass, []byte(`{"User":"1000","Cmd":["sh"]}`))
+	if !createDecision.Allowed {
+		t.Fatalf("expected label-defined exec create to allow, got: %s", createDecision.Reason)
+	}
+
+	e.StoreExecID("exec123", "shell")
+	followupClass := classifier.Classification{Action: "exec.start", Target: "container", ID: "exec123"}
+	followupReq := httptest.NewRequest("POST", "/exec/exec123/start", nil)
+	followupDecision := e.Authorize(followupReq, followupClass, nil)
+	if !followupDecision.Allowed {
+		t.Errorf("expected label-defined exec rule to allow exec.start followup, got: %s", followupDecision.Reason)
+	}
+}
+
 func TestEngine_TargetMismatch_Denied(t *testing.T) {
 	rules := []*config.Rule{{
 		Name:     "containeronly",
@@ -869,6 +1353,17 @@ func TestEngine_MultipleSelectorsANDed(t *testing.T) {
 	if decision.Allowed {
 		t.Error("expected deny when name doesn't match")
 	}
+}
+
+func mergeLabels(base, extra map[string]interface{}) map[string]interface{} {
+	labels := map[string]interface{}{}
+	for k, v := range base {
+		labels[k] = v
+	}
+	for k, v := range extra {
+		labels[k] = v
+	}
+	return labels
 }
 
 func TestGlobMatch(t *testing.T) {

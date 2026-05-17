@@ -91,9 +91,52 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		isExecFollowup = true
 	}
 
-	// Find rules that match action + target
+	// Find static rules that match action + target. Container-label rules are
+	// added after inspecting the target container so they stay container-scoped.
 	matchingRules := e.findRules(class.Action, class.Target)
+
+	// Parse body for create/exec actions
+	var bodyMap map[string]interface{}
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &bodyMap)
+	}
+
+	for _, rule := range matchingRules {
+		if ruleNeedsContainerMeta(rule, class) {
+			continue
+		}
+		if e.ruleAllows(rule, nil, bodyMap, class, isExecFollowup) {
+			return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
+		}
+	}
+
+	if len(matchingRules) == 0 && class.Action != "exec" && e.defaultPolicy == "allow" {
+		return Decision{Allowed: true, Reason: "default policy: allow"}
+	}
+
+	// Get container metadata only when container selectors need it.
+	var meta *ContainerMeta
+	var labelRuleErr error
+	if e.needsContainerMeta(matchingRules, class) {
+		var err error
+		meta, err = e.getContainerMeta(class.ID)
+		if err != nil {
+			log.Printf("WARN: failed to inspect %s: %v", class.ID, err)
+			return Decision{Allowed: false, Reason: "failed to inspect target"}
+		}
+
+		labelRules, err := config.ParseContainerLabelRules(meta.Labels)
+		if err != nil {
+			labelRuleErr = err
+		} else {
+			matchingRules = append(matchingRules, matchingContainerLabelRules(labelRules, class.Action, class.Target)...)
+		}
+	}
+
 	if len(matchingRules) == 0 {
+		if labelRuleErr != nil {
+			return Decision{Allowed: false, Reason: fmt.Sprintf("invalid container label rule: %v", labelRuleErr)}
+		}
 		if class.Action == "exec" {
 			return Decision{Allowed: false, Reason: "exec requires explicit rule"}
 		}
@@ -103,37 +146,15 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		return Decision{Allowed: false, Reason: fmt.Sprintf("no rules for action=%s target=%s", class.Action, class.Target)}
 	}
 
-	// Get container metadata only when container selectors need it.
-	var meta *ContainerMeta
-	if e.needsContainerMeta(matchingRules, class) {
-		var err error
-		meta, err = e.getContainerMeta(class.ID)
-		if err != nil {
-			log.Printf("WARN: failed to inspect %s: %v", class.ID, err)
-			return Decision{Allowed: false, Reason: "failed to inspect target"}
-		}
-	}
-
-	// Parse body for create/exec actions
-	var bodyMap map[string]interface{}
-	if len(body) > 0 {
-		_ = json.Unmarshal(body, &bodyMap)
-	}
-
 	// Evaluate rules (ORed)
 	for _, rule := range matchingRules {
-		if !e.ruleMatches(rule, meta, bodyMap, class) {
-			continue
+		if e.ruleAllows(rule, meta, bodyMap, class, isExecFollowup) {
+			return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
 		}
+	}
 
-		// Exec special case: require user validation (skip for followup requests)
-		if class.Action == "exec" && !isExecFollowup {
-			if !e.checkExecUser(rule, bodyMap) {
-				continue
-			}
-		}
-
-		return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
+	if labelRuleErr != nil {
+		return Decision{Allowed: false, Reason: fmt.Sprintf("invalid container label rule: %v", labelRuleErr)}
 	}
 
 	return Decision{Allowed: false, Reason: "no rule matched"}
@@ -143,8 +164,14 @@ func (e *Engine) needsContainerMeta(rules []*config.Rule, class classifier.Class
 	if class.Target != "container" || class.ID == "" || class.Action == "create" {
 		return false
 	}
+	if class.Action == "list" || class.Action == "prune" {
+		return false
+	}
+	if len(rules) == 0 || class.Action == "exec" {
+		return true
+	}
 	for _, rule := range rules {
-		if !rule.MatchAny {
+		if ruleNeedsContainerMeta(rule, class) {
 			return true
 		}
 	}
@@ -165,6 +192,32 @@ func (e *Engine) findRules(action, target string) []*config.Rule {
 		}
 	}
 	return result
+}
+
+func matchingContainerLabelRules(rules []*config.Rule, action, target string) []*config.Rule {
+	var result []*config.Rule
+	for _, r := range rules {
+		if r.HasAction(action) && r.HasTarget(target) {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func ruleNeedsContainerMeta(rule *config.Rule, class classifier.Classification) bool {
+	return class.Action != "create" && class.Target == "container" && class.ID != "" && !rule.MatchAny
+}
+
+func (e *Engine) ruleAllows(rule *config.Rule, meta *ContainerMeta, body map[string]interface{}, class classifier.Classification, isExecFollowup bool) bool {
+	if !e.ruleMatches(rule, meta, body, class) {
+		return false
+	}
+
+	if class.Action == "exec" && !isExecFollowup {
+		return e.checkExecUser(rule, body)
+	}
+
+	return true
 }
 
 // ruleMatches checks if a rule's selectors match the given metadata/body.

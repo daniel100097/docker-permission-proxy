@@ -32,6 +32,8 @@ type Rule struct {
 
 var ruleEnvRe = regexp.MustCompile(`^DPP_RULE_([^_]+)_(.+)$`)
 
+const ruleLabelPrefix = "dpp.rule."
+
 // Parse reads environment variables and returns a Config.
 func Parse() (*Config, error) {
 	cfg := &Config{
@@ -52,33 +54,115 @@ func Parse() (*Config, error) {
 			continue
 		}
 
-		m := ruleEnvRe.FindStringSubmatch(k)
-		if m == nil {
-			continue
-		}
-
-		name := strings.ToLower(m[1])
-		field := m[2]
-
-		rb, exists := builders[name]
-		if !exists {
-			rb = &ruleBuilder{name: name}
-			builders[name] = rb
-		}
-		rb.set(field, v)
+		addEnvRuleField(builders, k, v)
 	}
 
+	rules, err := buildRules(builders)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Rules = rules
+
+	return cfg, nil
+}
+
+// ParseContainerLabelRules parses rules declared on Docker container labels.
+// Label-defined rules are meant to be evaluated only for the container carrying
+// those labels; callers enforce that scope by parsing labels from the inspected
+// target container.
+func ParseContainerLabelRules(labels map[string]string) ([]*Rule, error) {
+	builders := map[string]*ruleBuilder{}
+
+	for k, v := range labels {
+		addContainerLabelRuleField(builders, k, v)
+	}
+
+	return buildRules(builders)
+}
+
+func addEnvRuleField(builders map[string]*ruleBuilder, key, value string) bool {
+	m := ruleEnvRe.FindStringSubmatch(key)
+	if m == nil {
+		return false
+	}
+
+	name := strings.ToLower(m[1])
+	field := m[2]
+	setRuleBuilderField(builders, name, field, value)
+	return true
+}
+
+func addContainerLabelRuleField(builders map[string]*ruleBuilder, key, value string) bool {
+	if !strings.HasPrefix(key, ruleLabelPrefix) {
+		return false
+	}
+
+	rest := key[len(ruleLabelPrefix):]
+	name, field, ok := strings.Cut(rest, ".")
+	if !ok || name == "" || field == "" {
+		setRuleBuilderField(builders, "invalidlabel", key, value)
+		return true
+	}
+
+	ruleField, ok := containerLabelRuleField(field)
+	if !ok {
+		setRuleBuilderField(builders, strings.ToLower(name), field, value)
+		return true
+	}
+
+	setRuleBuilderField(builders, strings.ToLower(name), ruleField, value)
+	return true
+}
+
+func containerLabelRuleField(field string) (string, bool) {
+	lower := strings.ToLower(field)
+	if strings.HasPrefix(lower, "match-label.") {
+		return "MATCH_LABEL_" + field[len("match-label."):], true
+	}
+
+	switch lower {
+	case "action":
+		return "ACTION", true
+	case "target":
+		return "TARGET", true
+	case "match":
+		return "MATCH", true
+	case "match-name":
+		return "MATCH_NAME", true
+	case "match-image":
+		return "MATCH_IMAGE", true
+	case "match-id":
+		return "MATCH_ID", true
+	case "exec-user":
+		return "EXEC_USER", true
+	case "exec-user-allow":
+		return "EXEC_USER_ALLOW", true
+	default:
+		return "", false
+	}
+}
+
+func setRuleBuilderField(builders map[string]*ruleBuilder, name, field, value string) {
+	rb, exists := builders[name]
+	if !exists {
+		rb = &ruleBuilder{name: name}
+		builders[name] = rb
+	}
+	rb.set(field, value)
+}
+
+func buildRules(builders map[string]*ruleBuilder) ([]*Rule, error) {
+	var rules []*Rule
 	for _, rb := range builders {
 		rule, err := rb.build()
 		if err != nil {
 			return nil, fmt.Errorf("rule %q: %w", rb.name, err)
 		}
 		if rule != nil {
-			cfg.Rules = append(cfg.Rules, rule)
+			rules = append(rules, rule)
 		}
 	}
-
-	return cfg, nil
+	return rules, nil
 }
 
 type ruleBuilder struct {

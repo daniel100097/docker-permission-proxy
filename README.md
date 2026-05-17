@@ -13,6 +13,7 @@ It is intended for cases where a tool needs limited Docker API access, but a raw
 - Rule-based access control via `DPP_RULE_*` environment variables
 - Traefik-style rule naming: `DPP_RULE_<name>_<field>`
 - Container selectors for labels, name, image, and ID prefix
+- Container-local rules declared directly on Docker container labels
 - Glob matching with `*`, `?`, and character classes
 - Exec user enforcement with root user/group protection
 - Exec-ID tracking for follow-up `exec.start`, `exec.resize`, and `exec.inspect`
@@ -105,6 +106,10 @@ Important parser details:
 - Selectors in one rule are ANDed, except `MATCH=*`, which is an explicit match-all selector.
 - Avoid combining `MATCH=*` with more specific selectors; `MATCH=*` makes the rule unscoped.
 
+Rules can also be declared on a container with Docker labels. Label-defined rules
+are evaluated only for the container that carries those labels, so they are useful
+when the container owner should opt in to specific operations for that container.
+
 ### Rule Fields
 
 | Field | Description |
@@ -123,6 +128,42 @@ Important parser details:
 labels commonly contain dots and slashes, such as `com.docker.compose.project`.
 Those are awkward to express in shell environment variable names. Prefer compose
 YAML or another environment injection mechanism if you need such keys.
+
+### Container Label Rules
+
+Container labels use this pattern:
+
+```text
+dpp.rule.<name>.<field>=<value>
+```
+
+Example:
+
+```yaml
+services:
+  app:
+    labels:
+      dpp.rule.self.action: "restart,logs"
+      dpp.rule.self.match: "*"
+```
+
+Supported label fields map to the environment rule fields:
+
+| Label field | Environment field |
+|-------------|-------------------|
+| `action` | `ACTION` |
+| `target` | `TARGET` |
+| `match` | `MATCH` |
+| `match-label.<key>` | `MATCH_LABEL_<key>` |
+| `match-name` | `MATCH_NAME` |
+| `match-image` | `MATCH_IMAGE` |
+| `match-id` | `MATCH_ID` |
+| `exec-user` | `EXEC_USER` |
+| `exec-user-allow` | `EXEC_USER_ALLOW` |
+
+Label-defined rules still use the same action, target, selector, glob, and exec
+user rules as environment-defined rules. They cannot grant access to other
+containers because DPP parses them from the inspected target container only.
 
 ### Glob Matching
 
@@ -283,6 +324,19 @@ DPP_RULE_prodctl_ACTION=start,stop,restart
 DPP_RULE_prodctl_TARGET=container
 DPP_RULE_prodctl_MATCH_LABEL_env=prod
 ```
+
+### Container-Local Restart Opt-In
+
+```yaml
+services:
+  worker:
+    labels:
+      dpp.rule.self.action: "restart"
+      dpp.rule.self.match: "*"
+```
+
+This allows `restart` only for this `worker` container. Other containers need
+their own labels or an environment-defined rule.
 
 ### Allow Logs By Name
 

@@ -97,7 +97,7 @@ func TestParse_InvalidDefault(t *testing.T) {
 func TestParse_SingleRule(t *testing.T) {
 	clearAllDPPEnvs(t)
 	setEnvs(t, map[string]string{
-		"DPP_RULE_mytest_ACTION": "exec",
+		"DPP_RULE_mytest_ACTION":           "exec",
 		"DPP_RULE_mytest_MATCH_LABEL_team": "dev",
 		"DPP_RULE_mytest_EXEC_USER_ALLOW":  "1000,1001",
 	})
@@ -135,14 +135,14 @@ func TestParse_SingleRule(t *testing.T) {
 func TestParse_MultipleRules(t *testing.T) {
 	clearAllDPPEnvs(t)
 	setEnvs(t, map[string]string{
-		"DPP_RULE_alpha_ACTION":          "list,inspect",
-		"DPP_RULE_alpha_TARGET":          "container,image",
-		"DPP_RULE_alpha_MATCH":           "*",
-		"DPP_RULE_beta_ACTION":           "start,stop,restart",
-		"DPP_RULE_beta_MATCH_LABEL_env":  "prod",
-		"DPP_RULE_gamma_ACTION":          "exec",
-		"DPP_RULE_gamma_MATCH_NAME":      "worker-*",
-		"DPP_RULE_gamma_EXEC_USER":       "1000",
+		"DPP_RULE_alpha_ACTION":         "list,inspect",
+		"DPP_RULE_alpha_TARGET":         "container,image",
+		"DPP_RULE_alpha_MATCH":          "*",
+		"DPP_RULE_beta_ACTION":          "start,stop,restart",
+		"DPP_RULE_beta_MATCH_LABEL_env": "prod",
+		"DPP_RULE_gamma_ACTION":         "exec",
+		"DPP_RULE_gamma_MATCH_NAME":     "worker-*",
+		"DPP_RULE_gamma_EXEC_USER":      "1000",
 	})
 
 	cfg, err := Parse()
@@ -320,7 +320,7 @@ func TestParse_MultipleLabels(t *testing.T) {
 func TestParse_LabelKeyCasePreserved(t *testing.T) {
 	clearAllDPPEnvs(t)
 	setEnvs(t, map[string]string{
-		"DPP_RULE_labels_ACTION":                 "inspect",
+		"DPP_RULE_labels_ACTION":               "inspect",
 		"DPP_RULE_labels_MATCH_LABEL_My.Label": "value",
 	})
 
@@ -334,6 +334,242 @@ func TestParse_LabelKeyCasePreserved(t *testing.T) {
 	}
 	if got := cfg.Rules[0].MatchLabels["My.Label"]; got != "value" {
 		t.Errorf("expected preserved label key My.Label=value, got %v", cfg.Rules[0].MatchLabels)
+	}
+}
+
+func TestParseContainerLabelRules(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.ops.action":          "start,stop",
+		"dpp.rule.ops.target":          "container",
+		"dpp.rule.ops.match-name":      "web-*",
+		"dpp.rule.ops.match-label.env": "prod",
+		"other.label":                  "ignored",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+
+	r := rules[0]
+	if r.Name != "ops" {
+		t.Errorf("expected rule name ops, got %s", r.Name)
+	}
+	if !r.HasAction("start") || !r.HasAction("stop") {
+		t.Errorf("expected start,stop actions, got %v", r.Actions)
+	}
+	if !r.HasTarget("container") {
+		t.Errorf("expected container target, got %v", r.Targets)
+	}
+	if r.MatchName != "web-*" {
+		t.Errorf("expected web-* match name, got %s", r.MatchName)
+	}
+	if r.MatchLabels["env"] != "prod" {
+		t.Errorf("expected env=prod match label, got %v", r.MatchLabels)
+	}
+}
+
+func TestParseContainerLabelRules_AllSupportedFields(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.shell.action":           "exec",
+		"dpp.rule.shell.target":           "container",
+		"dpp.rule.shell.match":            "*",
+		"dpp.rule.shell.match-name":       "worker-*",
+		"dpp.rule.shell.match-image":      "registry.acme.io/*",
+		"dpp.rule.shell.match-id":         "abc123",
+		"dpp.rule.shell.match-label.Team": "platform-*",
+		"dpp.rule.shell.exec-user":        "deploy:deploy",
+		"dpp.rule.shell.exec-user-allow":  "deploy,1000",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+
+	r := rules[0]
+	if r.Name != "shell" {
+		t.Errorf("expected rule name shell, got %s", r.Name)
+	}
+	if !r.HasAction("exec") {
+		t.Errorf("expected exec action, got %v", r.Actions)
+	}
+	if !r.HasTarget("container") {
+		t.Errorf("expected container target, got %v", r.Targets)
+	}
+	if !r.MatchAny {
+		t.Error("expected match=* to set MatchAny")
+	}
+	if r.MatchName != "worker-*" {
+		t.Errorf("expected worker-* match name, got %s", r.MatchName)
+	}
+	if r.MatchImage != "registry.acme.io/*" {
+		t.Errorf("expected registry.acme.io/* match image, got %s", r.MatchImage)
+	}
+	if r.MatchID != "abc123" {
+		t.Errorf("expected abc123 match id, got %s", r.MatchID)
+	}
+	if r.MatchLabels["Team"] != "platform-*" {
+		t.Errorf("expected preserved match label Team=platform-*, got %v", r.MatchLabels)
+	}
+	if r.ExecUser != "deploy:deploy" {
+		t.Errorf("expected exec user deploy:deploy, got %s", r.ExecUser)
+	}
+	if !r.ExecUserAllow["deploy"] || !r.ExecUserAllow["1000"] {
+		t.Errorf("expected exec user allow deploy,1000, got %v", r.ExecUserAllow)
+	}
+}
+
+func TestParseContainerLabelRules_MultipleRules(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.alpha.action":     "restart",
+		"dpp.rule.alpha.match-name": "web-*",
+		"dpp.rule.beta.action":      "logs,inspect",
+		"dpp.rule.beta.target":      "container,image",
+		"dpp.rule.beta.match":       "*",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
+	}
+
+	ruleMap := map[string]*Rule{}
+	for _, r := range rules {
+		ruleMap[r.Name] = r
+	}
+
+	alpha := ruleMap["alpha"]
+	if alpha == nil {
+		t.Fatal("missing alpha rule")
+	}
+	if !alpha.HasAction("restart") {
+		t.Errorf("expected alpha restart action, got %v", alpha.Actions)
+	}
+	if !alpha.HasTarget("container") {
+		t.Errorf("expected alpha default container target, got %v", alpha.Targets)
+	}
+	if alpha.MatchName != "web-*" {
+		t.Errorf("expected alpha match name web-*, got %s", alpha.MatchName)
+	}
+
+	beta := ruleMap["beta"]
+	if beta == nil {
+		t.Fatal("missing beta rule")
+	}
+	if !beta.HasAction("logs") || !beta.HasAction("inspect") {
+		t.Errorf("expected beta logs,inspect actions, got %v", beta.Actions)
+	}
+	if !beta.HasTarget("container") || !beta.HasTarget("image") {
+		t.Errorf("expected beta container,image targets, got %v", beta.Targets)
+	}
+	if !beta.MatchAny {
+		t.Error("expected beta match any")
+	}
+}
+
+func TestParseContainerLabelRules_RuleWithoutActionIgnored(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.noop.match-name": "web-*",
+		"dpp.rule.noop.target":     "container",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 0 {
+		t.Fatalf("expected rule without action to be ignored, got %d", len(rules))
+	}
+}
+
+func TestParseContainerLabelRules_FieldNamesAreCaseInsensitive(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.ops.ACTION":              "START, Stop",
+		"dpp.rule.ops.TARGET":              "CONTAINER",
+		"dpp.rule.ops.MATCH-LABEL.Service": "api-*",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	r := rules[0]
+	if !r.HasAction("start") || !r.HasAction("stop") {
+		t.Errorf("expected case-insensitive actions, got %v", r.Actions)
+	}
+	if !r.HasTarget("container") {
+		t.Errorf("expected case-insensitive target, got %v", r.Targets)
+	}
+	if r.MatchLabels["Service"] != "api-*" {
+		t.Errorf("expected preserved match label Service=api-*, got %v", r.MatchLabels)
+	}
+}
+
+func TestParseContainerLabelRules_CSVValuesAreTrimmedAndLowered(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.ops.action":          "Start , STOP , restart",
+		"dpp.rule.ops.target":          "Container , IMAGE",
+		"dpp.rule.ops.exec-user-allow": "Deploy , 1000",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	r := rules[0]
+	for _, action := range []string{"start", "stop", "restart"} {
+		if !r.HasAction(action) {
+			t.Errorf("expected action %s in %v", action, r.Actions)
+		}
+	}
+	if !r.HasTarget("container") || !r.HasTarget("image") {
+		t.Errorf("expected container,image targets, got %v", r.Targets)
+	}
+	if !r.ExecUserAllow["deploy"] || !r.ExecUserAllow["1000"] {
+		t.Errorf("expected deploy,1000 exec user allow, got %v", r.ExecUserAllow)
+	}
+}
+
+func TestParseContainerLabelRules_IgnoresNonLabelRuleKeys(t *testing.T) {
+	rules, err := ParseContainerLabelRules(map[string]string{
+		"DPP_RULE_devexec_ACTION":          "exec",
+		"DPP_RULE_devexec_EXEC_USER_ALLOW": "1000,deploy",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rules) != 0 {
+		t.Fatalf("expected DPP_RULE_* labels to be ignored, got %d", len(rules))
+	}
+}
+
+func TestParseContainerLabelRules_UnknownFieldReturnsError(t *testing.T) {
+	_, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.bad.action": "start",
+		"dpp.rule.bad.acton":  "stop",
+	})
+	if err == nil {
+		t.Fatal("expected unknown label rule field to return error")
+	}
+}
+
+func TestParseContainerLabelRules_MalformedPrefixReturnsError(t *testing.T) {
+	_, err := ParseContainerLabelRules(map[string]string{
+		"dpp.rule.broken": "start",
+	})
+	if err == nil {
+		t.Fatal("expected malformed label rule to return error")
 	}
 }
 
