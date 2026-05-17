@@ -94,15 +94,18 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 	// Find rules that match action + target
 	matchingRules := e.findRules(class.Action, class.Target)
 	if len(matchingRules) == 0 {
+		if class.Action == "exec" {
+			return Decision{Allowed: false, Reason: "exec requires explicit rule"}
+		}
 		if e.defaultPolicy == "allow" {
 			return Decision{Allowed: true, Reason: "default policy: allow"}
 		}
 		return Decision{Allowed: false, Reason: fmt.Sprintf("no rules for action=%s target=%s", class.Action, class.Target)}
 	}
 
-	// Get container metadata if we have an ID
+	// Get container metadata only when container selectors need it.
 	var meta *ContainerMeta
-	if class.ID != "" && class.Action != "create" {
+	if e.needsContainerMeta(matchingRules, class) {
 		var err error
 		meta, err = e.getContainerMeta(class.ID)
 		if err != nil {
@@ -133,11 +136,19 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
 	}
 
-	// Apply default policy
-	if e.defaultPolicy == "allow" {
-		return Decision{Allowed: true, Reason: "default policy: allow"}
-	}
 	return Decision{Allowed: false, Reason: "no rule matched"}
+}
+
+func (e *Engine) needsContainerMeta(rules []*config.Rule, class classifier.Classification) bool {
+	if class.Target != "container" || class.ID == "" || class.Action == "create" {
+		return false
+	}
+	for _, rule := range rules {
+		if !rule.MatchAny {
+			return true
+		}
+	}
+	return false
 }
 
 // StoreExecID caches an exec-id → container-id mapping.
@@ -250,20 +261,22 @@ func (e *Engine) checkExecUser(rule *config.Rule, body map[string]interface{}) b
 		return false
 	}
 
-	// Parse user:group format — only validate the user part
+	// Parse user:group format. Docker accepts both names and numeric IDs.
 	userPart := user
+	groupPart := ""
 	if idx := strings.IndexByte(user, ':'); idx >= 0 {
 		userPart = user[:idx]
+		groupPart = user[idx+1:]
 	}
 
-	// Always block root regardless of rules (UID 0 or name "root")
-	if userPart == "0" || userPart == "root" {
+	// Always block root user/group regardless of rules (UID/GID 0 or name "root").
+	if userPart == "0" || userPart == "root" || groupPart == "0" || groupPart == "root" {
 		return false
 	}
 
-	// If ExecUser is set, exact match required against the user part
+	// If ExecUser is set, exact match required.
 	if rule.ExecUser != "" {
-		return userPart == rule.ExecUser
+		return user == rule.ExecUser
 	}
 
 	// If ExecUserAllow is set, user must be in whitelist

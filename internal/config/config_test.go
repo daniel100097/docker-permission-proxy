@@ -83,6 +83,17 @@ func TestParse_GlobalConfig(t *testing.T) {
 	}
 }
 
+func TestParse_InvalidDefault(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_DEFAULT": "yolo",
+	})
+
+	if _, err := Parse(); err == nil {
+		t.Fatal("expected invalid DPP_DEFAULT to return error")
+	}
+}
+
 func TestParse_SingleRule(t *testing.T) {
 	clearAllDPPEnvs(t)
 	setEnvs(t, map[string]string{
@@ -209,6 +220,29 @@ func TestParse_RuleWithoutAction_Ignored(t *testing.T) {
 	}
 }
 
+func TestParse_UnknownRuleField_ReturnsError(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_RULE_bad_ACTION": "start",
+		"DPP_RULE_bad_ACTON":  "stop",
+	})
+
+	if _, err := Parse(); err == nil {
+		t.Fatal("expected unknown field to return error")
+	}
+}
+
+func TestParse_RuleNameWithUnderscore_ReturnsError(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_RULE_read_all_ACTION": "list",
+	})
+
+	if _, err := Parse(); err == nil {
+		t.Fatal("expected underscore in rule name to return error")
+	}
+}
+
 func TestParse_MatchImage(t *testing.T) {
 	clearAllDPPEnvs(t)
 	setEnvs(t, map[string]string{
@@ -280,6 +314,26 @@ func TestParse_MultipleLabels(t *testing.T) {
 	}
 	if r.MatchLabels["tier"] != "frontend" {
 		t.Errorf("expected tier=frontend")
+	}
+}
+
+func TestParse_LabelKeyCasePreserved(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_RULE_labels_ACTION":                 "inspect",
+		"DPP_RULE_labels_MATCH_LABEL_My.Label": "value",
+	})
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(cfg.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(cfg.Rules))
+	}
+	if got := cfg.Rules[0].MatchLabels["My.Label"]; got != "value" {
+		t.Errorf("expected preserved label key My.Label=value, got %v", cfg.Rules[0].MatchLabels)
 	}
 }
 

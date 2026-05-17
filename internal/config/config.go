@@ -92,6 +92,7 @@ type ruleBuilder struct {
 	matchID       string
 	execUser      string
 	execUserAllow string
+	unknownFields []string
 }
 
 func (rb *ruleBuilder) set(field, value string) {
@@ -122,10 +123,16 @@ func (rb *ruleBuilder) set(field, value string) {
 		rb.execUser = value
 	case upper == "EXEC_USER_ALLOW":
 		rb.execUserAllow = value
+	default:
+		rb.unknownFields = append(rb.unknownFields, field)
 	}
 }
 
 func (rb *ruleBuilder) build() (*Rule, error) {
+	if len(rb.unknownFields) > 0 {
+		return nil, fmt.Errorf("unknown field(s): %s", strings.Join(rb.unknownFields, ","))
+	}
+
 	// Rule is only valid if ACTION is present
 	if rb.actions == "" {
 		return nil, nil

@@ -138,6 +138,10 @@ func TestCache_MaxSize(t *testing.T) {
 	if !ok || v != "value" {
 		t.Errorf("expected overflow value, got %s (ok=%v)", v, ok)
 	}
+
+	if len(c.items) > c.maxSize {
+		t.Errorf("expected cache size <= %d, got %d", c.maxSize, len(c.items))
+	}
 }
 
 func TestCache_CleanupRuns(t *testing.T) {

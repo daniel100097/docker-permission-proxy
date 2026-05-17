@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/danielvolz/docker-permission-proxy/internal/config"
 	"github.com/danielvolz/docker-permission-proxy/internal/proxy"
@@ -63,7 +64,10 @@ func main() {
 	log.Printf("Listening on %s", cfg.Listen)
 
 	server := &http.Server{
-		Handler: handler,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -80,14 +84,26 @@ func createListener(listen string) (net.Listener, error) {
 	switch {
 	case strings.HasPrefix(listen, "unix://"):
 		socketPath := strings.TrimPrefix(listen, "unix://")
-		// Remove existing socket file if present
-		os.Remove(socketPath)
+		// Remove existing stale socket file if present.
+		if info, err := os.Lstat(socketPath); err == nil {
+			if info.Mode()&os.ModeSocket == 0 {
+				return nil, os.ErrExist
+			}
+			if err := os.Remove(socketPath); err != nil {
+				return nil, err
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
 		ln, err := net.Listen("unix", socketPath)
 		if err != nil {
 			return nil, err
 		}
 		// Make socket accessible
-		os.Chmod(socketPath, 0660)
+		if err := os.Chmod(socketPath, 0660); err != nil {
+			ln.Close()
+			return nil, err
+		}
 		log.Printf("Listening on unix socket: %s", socketPath)
 		return ln, nil
 

@@ -257,10 +257,9 @@ func TestProxy_StartContainer_AllowedByLabel(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		// This will be 403 because our mock docker doesn't have prod-app in inspect
-		// Let's just verify it reaches the auth engine properly
-		t.Logf("got status %d (expected - prod-app not in mock)", resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 204, got %d: %s", resp.StatusCode, body)
 	}
 }
 

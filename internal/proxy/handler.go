@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -18,6 +19,10 @@ import (
 	"github.com/danielvolz/docker-permission-proxy/internal/classifier"
 	"github.com/danielvolz/docker-permission-proxy/internal/config"
 )
+
+const maxInspectedBodySize = 10 << 20 // 10MB
+
+var errBodyTooLarge = errors.New("request body too large")
 
 // Handler is the main HTTP handler for the proxy.
 type Handler struct {
@@ -91,8 +96,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	var body []byte
 	if req.Method == "POST" && needsBodyInspection(class.Action) {
 		var err error
-		body, err = io.ReadAll(io.LimitReader(req.Body, 10<<20)) // 10MB limit
+		body, err = readLimited(req.Body, maxInspectedBodySize)
 		if err != nil {
+			if err == errBodyTooLarge {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
 			return
 		}
@@ -127,6 +136,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// Forward to upstream
 	h.proxy.ServeHTTP(w, req)
+}
+
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, errBodyTooLarge
+	}
+	return body, nil
 }
 
 // handleExecCreate intercepts exec create responses to capture the exec ID.

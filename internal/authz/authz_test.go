@@ -72,6 +72,36 @@ func TestEngine_NoRules_DenyAll(t *testing.T) {
 	}
 }
 
+func TestEngine_DefaultAllow_AllowsUnmatchedNonExec(t *testing.T) {
+	cfg := &config.Config{Rules: nil, Default: "allow", Upstream: "unix:///var/run/docker.sock"}
+	e := NewEngine(cfg)
+
+	class := classifier.Classification{Action: "list", Target: "container"}
+	req := httptest.NewRequest("GET", "/containers/json", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.Allowed {
+		t.Errorf("expected default allow for non-exec, got: %s", decision.Reason)
+	}
+}
+
+func TestEngine_DefaultAllow_DoesNotAllowUnknownOrExec(t *testing.T) {
+	cfg := &config.Config{Rules: nil, Default: "allow", Upstream: "unix:///var/run/docker.sock"}
+	e := NewEngine(cfg)
+
+	tests := []classifier.Classification{
+		{Action: "unknown", Target: "unknown"},
+		{Action: "exec", Target: "container", ID: "abc123"},
+	}
+
+	for _, class := range tests {
+		req := httptest.NewRequest("POST", "/", nil)
+		decision := e.Authorize(req, class, []byte(`{"User":"1000"}`))
+		if decision.Allowed {
+			t.Errorf("expected deny for %+v with default allow", class)
+		}
+	}
+}
+
 func TestEngine_MatchAny_AllowsAll(t *testing.T) {
 	rules := []*config.Rule{{
 		Name:     "readall",
@@ -111,6 +141,28 @@ func TestEngine_MatchAny_AllowsAll(t *testing.T) {
 	decision = e.Authorize(req, class, nil)
 	if !decision.Allowed {
 		t.Errorf("expected allow for inspect, got: %s", decision.Reason)
+	}
+}
+
+func TestEngine_MatchAny_NonContainerIDDoesNotInspectContainer(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:     "images",
+		Actions:  map[string]bool{"inspect": true},
+		Targets:  map[string]bool{"image": true},
+		MatchAny: true,
+	}}
+
+	server := mockDockerServer(nil)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "inspect", Target: "image", ID: "nginx"}
+	req := httptest.NewRequest("GET", "/images/nginx/json", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.Allowed {
+		t.Errorf("expected MatchAny image inspect to allow without container inspect, got: %s", decision.Reason)
 	}
 }
 
@@ -358,6 +410,13 @@ func TestEngine_ExecUserExact(t *testing.T) {
 		t.Error("expected deny for empty exec user")
 	}
 
+	// Exact user requires full string match, not just the user component
+	body = []byte(`{"User": "1000:1000", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny when exact exec user does not match full user:group string")
+	}
+
 	// Missing user field entirely
 	body = []byte(`{"User": "", "Cmd": ["sh"]}`)
 	decision = e.Authorize(req, class, body)
@@ -494,6 +553,19 @@ func TestEngine_ExecRootAlwaysBlocked(t *testing.T) {
 	decision = e.Authorize(req, class, body)
 	if decision.Allowed {
 		t.Error("expected deny for root:root")
+	}
+
+	// non-root user with root group blocked
+	body = []byte(`{"User": "1000:0", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny for 1000:0")
+	}
+
+	body = []byte(`{"User": "1000:root", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny for 1000:root")
 	}
 
 	// 0:0 format blocked

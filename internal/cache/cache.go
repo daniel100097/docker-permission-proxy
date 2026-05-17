@@ -40,6 +40,9 @@ func (c *TTLCache[T]) Set(key string, value T) {
 	// Evict if over max size
 	if len(c.items) >= c.maxSize {
 		c.evictExpired()
+		if len(c.items) >= c.maxSize {
+			c.evictAny()
+		}
 	}
 
 	c.items[key] = Entry[T]{
@@ -78,6 +81,13 @@ func (c *TTLCache[T]) evictExpired() {
 		if now.After(v.ExpiresAt) {
 			delete(c.items, k)
 		}
+	}
+}
+
+func (c *TTLCache[T]) evictAny() {
+	for k := range c.items {
+		delete(c.items, k)
+		return
 	}
 }
 
