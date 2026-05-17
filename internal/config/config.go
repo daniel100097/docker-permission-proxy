@@ -40,6 +40,10 @@ func Parse() (*Config, error) {
 		Default:  getEnv("DPP_DEFAULT", "deny"),
 	}
 
+	if cfg.Default != "allow" && cfg.Default != "deny" {
+		return nil, fmt.Errorf("DPP_DEFAULT must be \"allow\" or \"deny\", got %q", cfg.Default)
+	}
+
 	builders := map[string]*ruleBuilder{}
 
 	for _, kv := range os.Environ() {
@@ -101,9 +105,9 @@ func (rb *ruleBuilder) set(field, value string) {
 	case upper == "MATCH" && value == "*":
 		rb.matchAny = true
 	case strings.HasPrefix(upper, "MATCH_LABEL_"):
+		// Extract label key preserving the original case from the env var field
+		// (e.g. DPP_RULE_x_MATCH_LABEL_My.Label=val → key="My.Label")
 		labelKey := field[len("MATCH_LABEL_"):]
-		// Preserve original case for the label key
-		labelKey = strings.ToLower(labelKey)
 		if rb.matchLabels == nil {
 			rb.matchLabels = map[string]string{}
 		}

@@ -31,6 +31,7 @@ type Engine struct {
 	metaCache     *cache.TTLCache[*ContainerMeta]
 	execCache     *cache.TTLCache[string] // exec-id → container-id
 	upstream      string
+	client        *http.Client
 }
 
 // NewEngine creates a new authorization engine.
@@ -41,6 +42,7 @@ func NewEngine(cfg *config.Config) *Engine {
 		metaCache:     cache.New[*ContainerMeta](5*time.Second, 1000),
 		execCache:     cache.New[string](5*time.Minute, 10000),
 		upstream:      cfg.Upstream,
+		client:        newUpstreamClient(cfg.Upstream),
 	}
 }
 
@@ -55,6 +57,11 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 	// System actions (ping, version, info, events, df) are always allowed
 	if class.Target == "system" {
 		return Decision{Allowed: true, Reason: "system endpoint"}
+	}
+
+	// Explicitly deny unclassified/unknown actions regardless of default policy
+	if class.Action == "unknown" {
+		return Decision{Allowed: false, Reason: "unrecognized API endpoint"}
 	}
 
 	// Track if this is a follow-up exec request (start/resize/inspect)
@@ -87,6 +94,9 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 	// Find rules that match action + target
 	matchingRules := e.findRules(class.Action, class.Target)
 	if len(matchingRules) == 0 {
+		if e.defaultPolicy == "allow" {
+			return Decision{Allowed: true, Reason: "default policy: allow"}
+		}
 		return Decision{Allowed: false, Reason: fmt.Sprintf("no rules for action=%s target=%s", class.Action, class.Target)}
 	}
 
@@ -123,6 +133,10 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
 	}
 
+	// Apply default policy
+	if e.defaultPolicy == "allow" {
+		return Decision{Allowed: true, Reason: "default policy: allow"}
+	}
 	return Decision{Allowed: false, Reason: "no rule matched"}
 }
 
@@ -236,14 +250,25 @@ func (e *Engine) checkExecUser(rule *config.Rule, body map[string]interface{}) b
 		return false
 	}
 
-	// If ExecUser is set, exact match required
+	// Parse user:group format — only validate the user part
+	userPart := user
+	if idx := strings.IndexByte(user, ':'); idx >= 0 {
+		userPart = user[:idx]
+	}
+
+	// Always block root regardless of rules (UID 0 or name "root")
+	if userPart == "0" || userPart == "root" {
+		return false
+	}
+
+	// If ExecUser is set, exact match required against the user part
 	if rule.ExecUser != "" {
-		return user == rule.ExecUser
+		return userPart == rule.ExecUser
 	}
 
 	// If ExecUserAllow is set, user must be in whitelist
 	if len(rule.ExecUserAllow) > 0 {
-		return rule.ExecUserAllow[user]
+		return rule.ExecUserAllow[userPart]
 	}
 
 	// No exec user config means exec is denied (safer default)
@@ -267,10 +292,9 @@ func (e *Engine) getContainerMeta(id string) (*ContainerMeta, error) {
 
 // inspectContainer fetches container metadata from the upstream Docker socket.
 func (e *Engine) inspectContainer(id string) (*ContainerMeta, error) {
-	client := upstreamClient(e.upstream)
 	url := fmt.Sprintf("%s/containers/%s/json", upstreamURL(e.upstream), id)
 
-	resp, err := client.Get(url)
+	resp, err := e.client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("inspect request failed: %w", err)
 	}
@@ -280,7 +304,7 @@ func (e *Engine) inspectContainer(id string) (*ContainerMeta, error) {
 		return nil, fmt.Errorf("inspect returned status %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
 		return nil, fmt.Errorf("reading inspect body: %w", err)
 	}
@@ -321,13 +345,79 @@ func extractLabelsFromBody(body map[string]interface{}) map[string]string {
 	return labels
 }
 
-// globMatch performs a simple glob match supporting * and ? wildcards.
+// globMatch performs glob matching supporting *, ? and character class wildcards.
+// Unlike filepath.Match, it does not treat '/' as a special separator, so patterns
+// like "registry.acme.io/*" work correctly against values with slashes.
 func globMatch(pattern, value string) bool {
-	matched, err := filepath.Match(pattern, value)
-	if err != nil {
-		// If pattern is invalid, try prefix match for patterns like "registry.acme.io/*"
-		// filepath.Match doesn't support ** or paths with /, so fall back to manual
-		return strings.Contains(value, strings.ReplaceAll(pattern, "*", ""))
+	// Use recursive matching that handles *, ?, and [] without treating / specially.
+	return deepMatch(pattern, value)
+}
+
+// deepMatch performs recursive wildcard matching.
+// '*' matches any sequence of characters (including empty), '?' matches exactly one character,
+// and character classes [abc] are supported. '/' is not treated specially.
+func deepMatch(pattern, value string) bool {
+	for len(pattern) > 0 {
+		switch pattern[0] {
+		case '*':
+			// Skip consecutive stars
+			for len(pattern) > 0 && pattern[0] == '*' {
+				pattern = pattern[1:]
+			}
+			// Trailing * matches everything
+			if len(pattern) == 0 {
+				return true
+			}
+			// Try matching the rest of the pattern at each position in value
+			for i := 0; i <= len(value); i++ {
+				if deepMatch(pattern, value[i:]) {
+					return true
+				}
+			}
+			return false
+		case '?':
+			if len(value) == 0 {
+				return false
+			}
+			value = value[1:]
+			pattern = pattern[1:]
+		case '[':
+			if len(value) == 0 {
+				return false
+			}
+			// Use filepath.Match for the single-character class matching
+			// Find the closing ]
+			end := strings.IndexByte(pattern, ']')
+			if end < 0 {
+				// Malformed pattern — fail closed
+				return false
+			}
+			charClass := pattern[:end+1]
+			// Use filepath.Match with pattern "charClass" against single char
+			matched, err := filepath.Match(charClass, string(value[0]))
+			if err != nil || !matched {
+				return false
+			}
+			pattern = pattern[end+1:]
+			value = value[1:]
+		case '\\':
+			// Escaped character
+			pattern = pattern[1:]
+			if len(pattern) == 0 {
+				return false
+			}
+			if len(value) == 0 || value[0] != pattern[0] {
+				return false
+			}
+			value = value[1:]
+			pattern = pattern[1:]
+		default:
+			if len(value) == 0 || value[0] != pattern[0] {
+				return false
+			}
+			value = value[1:]
+			pattern = pattern[1:]
+		}
 	}
-	return matched
+	return len(value) == 0
 }

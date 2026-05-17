@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"path"
 	"strings"
 	"time"
 
@@ -44,7 +44,8 @@ func NewHandler(cfg *config.Config) *Handler {
 			},
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return net.Dial("unix", socketPath)
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", socketPath)
 				},
 				ResponseHeaderTimeout: 0,
 				IdleConnTimeout:       90 * time.Second,
@@ -74,17 +75,23 @@ func NewHandler(cfg *config.Config) *Handler {
 // ServeHTTP handles incoming HTTP requests.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	start := time.Now()
-	path := req.URL.Path
+
+	// Normalize the path to prevent bypass via //, /../, etc.
+	cleanedPath := path.Clean(req.URL.Path)
+	if cleanedPath == "." {
+		cleanedPath = "/"
+	}
+	req.URL.Path = cleanedPath
 
 	// Classify the request
-	class := classifier.Classify(req.Method, path)
-	log.Printf("REQ %s %s → action=%s target=%s id=%s", req.Method, path, class.Action, class.Target, class.ID)
+	class := classifier.Classify(req.Method, cleanedPath)
+	log.Printf("REQ %s %s → action=%s target=%s id=%s", req.Method, cleanedPath, class.Action, class.Target, class.ID)
 
 	// Read body for POST requests that need authorization inspection
 	var body []byte
 	if req.Method == "POST" && needsBodyInspection(class.Action) {
 		var err error
-		body, err = io.ReadAll(req.Body)
+		body, err = io.ReadAll(io.LimitReader(req.Body, 10<<20)) // 10MB limit
 		if err != nil {
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
 			return
@@ -99,12 +106,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	decision := h.engine.Authorize(req, class, body)
 
 	if !decision.Allowed {
-		log.Printf("DENY %s %s (%s) [%s]", req.Method, path, decision.Reason, time.Since(start))
-		http.Error(w, fmt.Sprintf("forbidden: %s\n", decision.Reason), http.StatusForbidden)
+		log.Printf("DENY %s %s (%s) [%s]", req.Method, cleanedPath, decision.Reason, time.Since(start))
+		http.Error(w, "forbidden\n", http.StatusForbidden)
 		return
 	}
 
-	log.Printf("ALLOW %s %s (%s) [%s]", req.Method, path, decision.Reason, time.Since(start))
+	log.Printf("ALLOW %s %s (%s) [%s]", req.Method, cleanedPath, decision.Reason, time.Since(start))
 
 	// For exec create, capture the response to store the exec-id mapping
 	if class.Action == "exec" && req.Method == "POST" {
@@ -112,8 +119,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Check if this is an upgrade request (for attach/exec start)
-	if isUpgradeRequest(req) {
+	// Check if this is an upgrade request (only allowed for attach/exec start)
+	if isUpgradeRequest(req) && isUpgradeAllowed(class.Action) {
 		h.handleUpgrade(w, req)
 		return
 	}
@@ -128,13 +135,16 @@ func (h *Handler) handleExecCreate(w http.ResponseWriter, req *http.Request, con
 	rec := &responseRecorder{
 		ResponseWriter: w,
 		body:           &bytes.Buffer{},
-		statusCode:     http.StatusOK,
 	}
 
 	h.proxy.ServeHTTP(rec, req)
 
 	// Try to extract exec ID from response
-	if rec.statusCode >= 200 && rec.statusCode < 300 {
+	statusCode := rec.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK // default if WriteHeader never called
+	}
+	if statusCode >= 200 && statusCode < 300 {
 		var execResp struct {
 			ID string `json:"Id"`
 		}
@@ -151,8 +161,6 @@ func (h *Handler) handleExecCreate(w http.ResponseWriter, req *http.Request, con
 
 // handleUpgrade handles connection upgrade for attach/exec websocket connections.
 func (h *Handler) handleUpgrade(w http.ResponseWriter, req *http.Request) {
-	socketPath := strings.TrimPrefix(h.upstream, "unix://")
-
 	// Hijack the client connection
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -162,26 +170,37 @@ func (h *Handler) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("hijack failed: %v", err), http.StatusInternalServerError)
+		log.Printf("ERROR: hijack failed: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	defer clientConn.Close()
 
 	// Connect to upstream
-	upstreamConn, err := net.Dial("unix", socketPath)
+	var upstreamConn net.Conn
+	if strings.HasPrefix(h.upstream, "unix://") {
+		socketPath := strings.TrimPrefix(h.upstream, "unix://")
+		upstreamConn, err = net.DialTimeout("unix", socketPath, 30*time.Second)
+	} else {
+		host := strings.TrimPrefix(h.upstream, "http://")
+		upstreamConn, err = net.DialTimeout("tcp", host, 30*time.Second)
+	}
 	if err != nil {
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 	defer upstreamConn.Close()
 
-	// Write the original request to upstream
+	// Write the original request to upstream (set Host like Director would)
+	req.URL.Scheme = "http"
+	req.URL.Host = "docker"
+	req.Host = "docker"
 	if err := req.Write(upstreamConn); err != nil {
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 
-	// Bidirectional copy
+	// Bidirectional copy — wait for both goroutines
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(upstreamConn, clientConn)
@@ -191,6 +210,10 @@ func (h *Handler) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 		io.Copy(clientConn, upstreamConn)
 		done <- struct{}{}
 	}()
+	<-done
+	// Close connections to unblock the other goroutine
+	clientConn.Close()
+	upstreamConn.Close()
 	<-done
 }
 
@@ -208,6 +231,16 @@ func needsBodyInspection(action string) bool {
 func isUpgradeRequest(req *http.Request) bool {
 	return strings.EqualFold(req.Header.Get("Upgrade"), "tcp") ||
 		strings.EqualFold(req.Header.Get("Connection"), "Upgrade")
+}
+
+// isUpgradeAllowed checks if the action supports connection upgrades.
+func isUpgradeAllowed(action string) bool {
+	switch action {
+	case "attach", "exec.start":
+		return true
+	default:
+		return false
+	}
 }
 
 // responseRecorder captures the response while also writing to the client.

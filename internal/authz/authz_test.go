@@ -447,6 +447,77 @@ func TestEngine_ExecNoUserConfig_Denied(t *testing.T) {
 	}
 }
 
+func TestEngine_ExecRootAlwaysBlocked(t *testing.T) {
+	// Even if ExecUserAllow includes "root" or "0", they should be blocked
+	rules := []*config.Rule{{
+		Name:          "roottest",
+		Actions:       map[string]bool{"exec": true},
+		Targets:       map[string]bool{"container": true},
+		MatchAny:      true,
+		ExecUserAllow: map[string]bool{"root": true, "0": true, "1000": true},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"any": {
+			"Id": "anyfull", "Name": "/any-container",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "exec", Target: "container", ID: "any"}
+	req := httptest.NewRequest("POST", "/containers/any/exec", nil)
+
+	// root always blocked
+	body := []byte(`{"User": "root", "Cmd": ["sh"]}`)
+	decision := e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny for root even if in allowlist")
+	}
+
+	// UID 0 always blocked
+	body = []byte(`{"User": "0", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny for UID 0 even if in allowlist")
+	}
+
+	// root:root format blocked
+	body = []byte(`{"User": "root:root", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny for root:root")
+	}
+
+	// 0:0 format blocked
+	body = []byte(`{"User": "0:0", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if decision.Allowed {
+		t.Error("expected deny for 0:0")
+	}
+
+	// user:group with allowed user works (group ignored)
+	body = []byte(`{"User": "1000:1000", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if !decision.Allowed {
+		t.Errorf("expected allow for 1000:1000, got: %s", decision.Reason)
+	}
+
+	// allowed user still works
+	body = []byte(`{"User": "1000", "Cmd": ["sh"]}`)
+	decision = e.Authorize(req, class, body)
+	if !decision.Allowed {
+		t.Errorf("expected allow for 1000, got: %s", decision.Reason)
+	}
+}
+
 func TestEngine_ExecStartFollowup(t *testing.T) {
 	rules := []*config.Rule{{
 		Name:          "devexec",
@@ -742,6 +813,48 @@ func TestGlobMatch(t *testing.T) {
 		{"worker-??", "worker-001", false},
 		{"exact", "exact", true},
 		{"exact", "other", false},
+
+		// === Bug-revealing cases ===
+
+		// Bug 1: Multi-wildcard patterns with '/' — only first '*' is split,
+		// suffix retains literal '*' so HasSuffix fails.
+		// Pattern "registry.io/*/image" should match "registry.io/org/image"
+		{"registry.io/*/image", "registry.io/org/image", true},
+		// Pattern "registry.io/*:*" should match "registry.io/app:latest"
+		{"registry.io/*:*", "registry.io/app:latest", true},
+		// Pattern "*backend*" — no '/' so filepath.Match handles it, should work
+		{"*backend*", "my-backend-service", true},
+		{"*backend*", "frontend", false},
+
+		// Bug 4: '?' wildcard in patterns with '/' — falls through to exact match
+		{"registry.io/app-?", "registry.io/app-1", true},
+		{"registry.io/app-?", "registry.io/app-12", false},
+
+		// Patterns with '/' and single '*' (the happy path that does work)
+		{"registry.io/*", "registry.io/myapp:latest", true},
+		{"registry.io/*", "other.io/myapp", false},
+
+		// Edge: pattern with '/' and no wildcard — exact match
+		{"registry.io/exact", "registry.io/exact", true},
+		{"registry.io/exact", "registry.io/other", false},
+
+		// Edge: empty pattern and value
+		{"", "", true},
+		{"*", "", true},
+		{"", "notempty", false},
+
+		// filepath.Match with bracket characters in pattern (returns ErrBadPattern → false)
+		{"my[app", "my[app", false}, // malformed bracket = silent deny, arguably a bug
+		// Backslash in pattern on Linux — '\a' matches literal 'a'
+		{"my\\app", "myapp", true}, // filepath.Match treats \ as escape on non-Windows
+
+		// Value with special chars (pattern is simple glob, value has brackets)
+		{"my-*", "my-[weird]-app", true},
+
+		// Suffix overlap: prefix+suffix together longer than value — should NOT match
+		// "longprefix*longprefix.io" requires "longprefix" before * and "longprefix.io" after *
+		// which is impossible when the value is shorter than both combined
+		{"registry.io/longprefix*longprefix.io", "registry.io/longprefix.io", false},
 	}
 
 	for _, tt := range tests {
