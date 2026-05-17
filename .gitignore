@@ -24,6 +24,10 @@ profile.cov
 go.work
 go.work.sum
 
+# Binary output
+/dsp
+/cmd/dsp/dsp
+
 # env file
 .env
 

@@ -1,0 +1,37 @@
+# Docker Permission Proxy - Example docker-compose.yml
+#
+# This example shows how to run the proxy with Traefik-style rule configuration.
+
+services:
+  docker-proxy:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Listener configuration
+      DPP_LISTEN: "tcp://0.0.0.0:2375"
+      DPP_UPSTREAM: "unix:///var/run/docker.sock"
+      DPP_DEFAULT: "deny"
+
+      # Rule: Allow exec on containers labeled team=dev, restrict to specific users
+      DPP_RULE_devexec_ACTION: "exec"
+      DPP_RULE_devexec_MATCH_LABEL_team: "dev"
+      DPP_RULE_devexec_EXEC_USER_ALLOW: "1000,1001,deploy"
+
+      # Rule: Allow start/stop/restart/kill on containers labeled env=prod
+      DPP_RULE_opsctl_ACTION: "start,stop,restart,kill"
+      DPP_RULE_opsctl_MATCH_LABEL_env: "prod"
+
+      # Rule: Allow container creation only for images from our registry
+      DPP_RULE_cicreate_ACTION: "create"
+      DPP_RULE_cicreate_MATCH_IMAGE: "registry.acme.io/*"
+
+      # Rule: Allow read-only operations on all containers, images, networks, volumes
+      DPP_RULE_readall_ACTION: "list,inspect,logs"
+      DPP_RULE_readall_TARGET: "container,image,network,volume"
+      DPP_RULE_readall_MATCH: "*"
+    ports:
+      - "127.0.0.1:2375:2375"
+    # Run as non-root but with access to docker socket via group
+    # user: "1000:999"  # Uncomment and adjust GID to match docker group
