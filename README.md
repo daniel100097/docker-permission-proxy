@@ -399,6 +399,8 @@ DPP_RULE_cicreate_MATCH_IMAGE=registry.acme.io/*
 ## Docker Compose
 
 See [`docker-compose.yml`](docker-compose.yml) for a local build example.
+See [`docs/examples`](docs/examples) for focused Compose examples, including
+Traefik, exec-only, restart-only, and logs-only proxy profiles.
 
 Two deployment notes matter:
 
@@ -439,10 +441,22 @@ The GitHub Actions workflow runs:
 - `go test -race -count=1 ./...`
 - Docker build and push to GHCR for non-PR pushes
 
-Published image name:
+Published image:
 
 ```text
-ghcr.io/danielvolz/docker-permission-proxy
+ghcr.io/daniel100097/docker-permission-proxy
+```
+
+Container package URL:
+
+```text
+https://github.com/daniel100097/docker-permission-proxy/pkgs/container/docker-permission-proxy
+```
+
+Pull the branch image:
+
+```bash
+docker pull ghcr.io/daniel100097/docker-permission-proxy:main
 ```
 
 The workflow publishes branch, semantic-version tag, and SHA tags. Prefer pinned

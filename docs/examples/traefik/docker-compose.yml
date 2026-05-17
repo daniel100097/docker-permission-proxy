@@ -1,0 +1,35 @@
+# Traefik reads Docker state through DPP instead of mounting docker.sock directly.
+# Create ./run first, or replace it with another host directory for the Unix socket.
+
+services:
+  traefik:
+    image: traefik:latest
+    depends_on:
+      - traefik-docker-proxy
+    command:
+      - "--providers.docker.endpoint=unix:///var/run/traefik-docker-permission-proxy/socket.sock"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.defaultrule=Host(`{{ normalize .Name }}.localhost`)"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+    volumes:
+      - ./run:/var/run/traefik-docker-permission-proxy
+
+  traefik-docker-proxy:
+    image: ghcr.io/daniel100097/docker-permission-proxy:main
+    user: "1000:975" # replace 975 with: stat -c '%g' /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./run:/var/run/traefik-docker-permission-proxy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    environment:
+      DPP_LISTEN: unix:///var/run/traefik-docker-permission-proxy/socket.sock
+      DPP_DEFAULT: deny
+      DPP_RULE_traefikread_ACTION: list,inspect
+      DPP_RULE_traefikread_TARGET: container,network
+      DPP_RULE_traefikread_MATCH: "*"

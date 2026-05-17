@@ -1,0 +1,28 @@
+# Logs-only Docker API socket for a collector.
+# The collector can read logs for opted-in containers but cannot inspect, restart,
+# exec into, or remove them.
+
+services:
+  app:
+    image: nginx:alpine
+    labels:
+      dpp.rule.logs.action: logs
+      dpp.rule.logs.match: "*"
+
+  docker-log-proxy:
+    image: ghcr.io/daniel100097/docker-permission-proxy:main
+    user: "1000:975" # replace 975 with: stat -c '%g' /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./run:/var/run/docker-permission-proxy
+    environment:
+      DPP_LISTEN: unix:///var/run/docker-permission-proxy/socket.sock
+      DPP_DEFAULT: deny
+
+  collector:
+    image: alpine:latest
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./run:/var/run/docker-permission-proxy
+    environment:
+      DOCKER_HOST: unix:///var/run/docker-permission-proxy/socket.sock

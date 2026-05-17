@@ -1,0 +1,18 @@
+# Allows only docker restart for nginx through a container-local DPP rule label.
+
+services:
+  nginx:
+    image: nginx:alpine
+    labels:
+      dpp.rule.restart.action: restart
+      dpp.rule.restart.match: "*"
+
+  nginx-restart-proxy:
+    image: ghcr.io/daniel100097/docker-permission-proxy:main
+    user: "1000:975" # replace 975 with: stat -c '%g' /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./run:/var/run/dpp
+    environment:
+      DPP_LISTEN: unix:///var/run/dpp/socket.sock
+      DPP_DEFAULT: deny
