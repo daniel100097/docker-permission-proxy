@@ -5,9 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 // Request describes one Docker API operation that needs confirmation.
@@ -44,7 +45,7 @@ func NewDesktop(timeout time.Duration) *Desktop {
 	return &Desktop{Timeout: timeout}
 }
 
-// Ask opens kdialog or zenity and returns true only when the user confirms.
+// Ask sends an actionable desktop notification and returns true only when the user confirms.
 func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -57,28 +58,123 @@ func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
 		message = fmt.Sprintf("%s %s", req.Method, req.Path)
 	}
 
-	if path, ok := lookup("kdialog"); ok {
-		return runQuestion(exec.CommandContext(ctx, path, "--title", "Docker Permission Proxy", "--yesno", message))
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		return false, fmt.Errorf("connect session bus: %w", err)
 	}
-	if path, ok := lookup("zenity"); ok {
-		return runQuestion(exec.CommandContext(ctx, path, "--question", "--title", "Docker Permission Proxy", "--width", "640", "--text", message))
+	defer conn.Close()
+
+	obj := conn.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
+	capabilities, err := notificationCapabilities(obj)
+	if err != nil {
+		return false, err
+	}
+	if !capabilities["actions"] {
+		return false, errors.New("desktop notification service does not support actions")
 	}
 
-	return false, errors.New("neither kdialog nor zenity was found in PATH")
+	signals := make(chan *dbus.Signal, 10)
+	conn.Signal(signals)
+	defer conn.RemoveSignal(signals)
+
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchInterface("org.freedesktop.Notifications"),
+		dbus.WithMatchMember("ActionInvoked"),
+	); err != nil {
+		return false, fmt.Errorf("listen for notification actions: %w", err)
+	}
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchInterface("org.freedesktop.Notifications"),
+		dbus.WithMatchMember("NotificationClosed"),
+	); err != nil {
+		return false, fmt.Errorf("listen for notification close: %w", err)
+	}
+
+	notificationID, err := sendNotification(obj, req, message, d.Timeout)
+	if err != nil {
+		return false, err
+	}
+	defer obj.Call("org.freedesktop.Notifications.CloseNotification", 0, notificationID)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("confirmation timed out: %w", ctx.Err())
+		case signal := <-signals:
+			allowed, done := handleNotificationSignal(signal, notificationID)
+			if done {
+				return allowed, nil
+			}
+		}
+	}
 }
 
-func runQuestion(cmd *exec.Cmd) (bool, error) {
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
+func notificationCapabilities(obj dbus.BusObject) (map[string]bool, error) {
+	var caps []string
+	if err := obj.Call("org.freedesktop.Notifications.GetCapabilities", 0).Store(&caps); err != nil {
+		return nil, fmt.Errorf("read notification capabilities: %w", err)
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return false, nil
+	result := map[string]bool{}
+	for _, cap := range caps {
+		result[cap] = true
 	}
-	return false, err
+	return result, nil
 }
 
-func lookup(name string) (string, bool) {
-	path, err := exec.LookPath(name)
-	return path, err == nil
+func sendNotification(obj dbus.BusObject, req Request, message string, timeout time.Duration) (uint32, error) {
+	actions := []string{"approve", "Approve", "deny", "Deny"}
+	hints := map[string]dbus.Variant{
+		"resident":  dbus.MakeVariant(true),
+		"transient": dbus.MakeVariant(false),
+	}
+
+	summary := "Docker Permission Proxy"
+	if req.Command != "" {
+		summary = "Confirm: " + req.Command
+	}
+
+	var id uint32
+	call := obj.Call(
+		"org.freedesktop.Notifications.Notify",
+		0,
+		"Docker Permission Proxy",
+		uint32(0),
+		"dialog-question",
+		summary,
+		message,
+		actions,
+		hints,
+		int32(timeout/time.Millisecond),
+	)
+	if call.Err != nil {
+		return 0, fmt.Errorf("send desktop notification: %w", call.Err)
+	}
+	if err := call.Store(&id); err != nil {
+		return 0, fmt.Errorf("read desktop notification id: %w", err)
+	}
+	return id, nil
+}
+
+func handleNotificationSignal(signal *dbus.Signal, notificationID uint32) (bool, bool) {
+	if signal == nil || len(signal.Body) < 1 {
+		return false, false
+	}
+
+	id, ok := signal.Body[0].(uint32)
+	if !ok || id != notificationID {
+		return false, false
+	}
+
+	switch signal.Name {
+	case "org.freedesktop.Notifications.ActionInvoked":
+		if len(signal.Body) < 2 {
+			return false, true
+		}
+		action, _ := signal.Body[1].(string)
+		return action == "approve", true
+	case "org.freedesktop.Notifications.NotificationClosed":
+		return false, true
+	default:
+		return false, false
+	}
 }

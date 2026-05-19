@@ -12,7 +12,7 @@ It is intended for cases where a tool needs limited Docker API access, but a raw
 
 - Rule-based access control via `DPP_RULE_*` environment variables
 - Per-rule decisions: `allow`, `deny`, or desktop-confirmed `ask`
-- Desktop confirmation dialogs through `kdialog` or `zenity`
+- Desktop confirmations through the user's D-Bus notification service
 - Traefik-style rule naming: `DPP_RULE_<name>_<field>`
 - Container selectors for labels, name, image, and ID prefix
 - Container-local rules declared directly on Docker container labels
@@ -361,11 +361,12 @@ services:
       DPP_RULE_prodask_MATCH_LABEL_env: "prod"
 ```
 
-The image includes Debian's `zenity`, and DPP also uses `kdialog` if you add it
-to a custom image. DPP opens one question dialog at a time with the matching
-rule, Docker API request, action, target, and an approximate Docker command such as
-`docker container restart prod-app`. If the dialog command is unavailable, times
-out, or the dialog is rejected, the Docker request is denied.
+DPP sends one actionable desktop notification at a time through the user's D-Bus
+notification service. The notification contains the matching rule, Docker API
+request, action, target, and an approximate Docker command such as
+`docker container restart prod-app`. If the notification service is unavailable,
+does not support actions, times out, or the notification is rejected/closed, the
+Docker request is denied.
 
 The `user: "1000:1000"` setting matters because `/run/user/1000` is normally
 private to UID 1000. Change the UID/GID if your desktop session uses a different
