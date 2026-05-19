@@ -114,8 +114,10 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		}
 	}
 
-	if !needsMeta && len(matchingRules) == 0 && class.Action != "exec" && e.defaultPolicy == "allow" {
-		return Decision{Allowed: true, Reason: "default policy: allow"}
+	if !needsMeta && len(matchingRules) == 0 && class.Action != "exec" {
+		if decision, decided := e.defaultDecision(); decided {
+			return decision
+		}
 	}
 
 	// Get container metadata only when container selectors need it.
@@ -144,8 +146,8 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		if class.Action == "exec" {
 			return Decision{Allowed: false, Reason: "exec requires explicit rule"}
 		}
-		if e.defaultPolicy == "allow" {
-			return Decision{Allowed: true, Reason: "default policy: allow"}
+		if decision, decided := e.defaultDecision(); decided {
+			return decision
 		}
 		return Decision{Allowed: false, Reason: fmt.Sprintf("no rules for action=%s target=%s", class.Action, class.Target)}
 	}
@@ -159,6 +161,22 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 	}
 
 	return Decision{Allowed: false, Reason: "no rule matched"}
+}
+
+func (e *Engine) defaultDecision() (Decision, bool) {
+	switch e.defaultPolicy {
+	case config.DecisionAllow:
+		return Decision{Allowed: true, Reason: "default policy: allow"}, true
+	case config.DecisionAsk:
+		return Decision{
+			NeedsConfirmation: true,
+			Reason:            "default policy: ask",
+			RuleName:          "default",
+			RuleDecision:      config.DecisionAsk,
+		}, true
+	default:
+		return Decision{}, false
+	}
 }
 
 func (e *Engine) applyRuleDecisions(rules []*config.Rule, meta *ContainerMeta, body map[string]interface{}, class classifier.Classification, isExecFollowup bool) (Decision, bool) {
@@ -182,11 +200,6 @@ func (e *Engine) applyRuleDecisions(rules []*config.Rule, meta *ContainerMeta, b
 			decision.Reason = fmt.Sprintf("rule %q denied", rule.Name)
 			return decision, true
 		case config.DecisionAsk:
-			if isExecFollowup {
-				decision.Allowed = true
-				decision.Reason = fmt.Sprintf("rule %q matched confirmed exec", rule.Name)
-				return decision, true
-			}
 			if ask == nil {
 				decision.NeedsConfirmation = true
 				decision.Reason = fmt.Sprintf("rule %q asks for confirmation", rule.Name)

@@ -13,8 +13,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Direct desktop confirmation support for Wayland/GNOME/KDE.
       - /run/user/1000:/run/user/1000
-      # X11 fallback for desktops where zenity uses DISPLAY.
-      - /tmp/.X11-unix:/tmp/.X11-unix:ro
     environment:
       # Listener configuration
       DPP_LISTEN: "tcp://0.0.0.0:2375"
@@ -23,7 +21,6 @@ services:
       DPP_CONFIRM_TIMEOUT: "30s"
       XDG_RUNTIME_DIR: "/run/user/1000"
       DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus"
-      DISPLAY: "${DISPLAY:-}"
       WAYLAND_DISPLAY: "${WAYLAND_DISPLAY:-wayland-0}"
 
       # Rule: Allow exec on containers labeled team=dev, restrict to specific users

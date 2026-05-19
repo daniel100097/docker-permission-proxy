@@ -65,7 +65,6 @@ func TestParse_GlobalConfig(t *testing.T) {
 		"DPP_LISTEN":          "unix:///tmp/test.sock",
 		"DPP_UPSTREAM":        "unix:///custom/docker.sock",
 		"DPP_DEFAULT":         "allow",
-		"DPP_CONFIRM_SOCKET":  "unix:///tmp/dpp-confirm.sock",
 		"DPP_CONFIRM_TIMEOUT": "5s",
 	})
 
@@ -83,9 +82,6 @@ func TestParse_GlobalConfig(t *testing.T) {
 	if cfg.Default != "allow" {
 		t.Errorf("expected allow, got %s", cfg.Default)
 	}
-	if cfg.ConfirmSocket != "unix:///tmp/dpp-confirm.sock" {
-		t.Errorf("expected confirmation socket, got %s", cfg.ConfirmSocket)
-	}
 	if cfg.ConfirmTimeout.String() != "5s" {
 		t.Errorf("expected confirmation timeout 5s, got %s", cfg.ConfirmTimeout)
 	}
@@ -99,6 +95,21 @@ func TestParse_InvalidDefault(t *testing.T) {
 
 	if _, err := Parse(); err == nil {
 		t.Fatal("expected invalid DPP_DEFAULT to return error")
+	}
+}
+
+func TestParse_DefaultAsk(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_DEFAULT": "ask",
+	})
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Default != "ask" {
+		t.Fatalf("expected default ask, got %s", cfg.Default)
 	}
 }
 

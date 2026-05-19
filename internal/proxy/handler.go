@@ -78,15 +78,8 @@ func NewHandler(cfg *config.Config) *Handler {
 		engine:    engine,
 		proxy:     proxy,
 		upstream:  upstream,
-		confirmer: newConfirmer(cfg),
+		confirmer: confirm.NewDesktop(cfg.ConfirmTimeout),
 	}
-}
-
-func newConfirmer(cfg *config.Config) confirm.Confirmer {
-	if cfg.ConfirmSocket != "" {
-		return confirm.NewClient(cfg.ConfirmSocket, cfg.ConfirmTimeout)
-	}
-	return confirm.NewDesktop(cfg.ConfirmTimeout)
 }
 
 // ServeHTTP handles incoming HTTP requests.

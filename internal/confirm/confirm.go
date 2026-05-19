@@ -1,14 +1,11 @@
-// Package confirm contains desktop and Unix-socket confirmation helpers.
+// Package confirm contains desktop confirmation helpers.
 package confirm
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -30,27 +27,6 @@ type Request struct {
 // Confirmer asks whether a confirmation request should be allowed.
 type Confirmer interface {
 	Ask(ctx context.Context, req Request) (bool, error)
-}
-
-// Response is returned by the confirmation helper.
-type Response struct {
-	Allow bool `json:"allow"`
-}
-
-// Client asks a confirmation helper over a Unix socket.
-type Client struct {
-	Socket  string
-	Timeout time.Duration
-}
-
-var ErrNoSocket = errors.New("confirmation socket is not configured")
-
-// NewClient creates a confirmation client.
-func NewClient(socket string, timeout time.Duration) Client {
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	return Client{Socket: socket, Timeout: timeout}
 }
 
 // Desktop asks through a desktop dialog inside the current process environment.
@@ -84,47 +60,6 @@ func (d Desktop) Ask(ctx context.Context, req Request) (bool, error) {
 	}
 
 	return false, errors.New("neither kdialog nor zenity was found in PATH")
-}
-
-// Ask sends one confirmation request and waits for the helper response.
-func (c Client) Ask(ctx context.Context, req Request) (bool, error) {
-	socketPath := normalizeUnixSocket(c.Socket)
-	if socketPath == "" {
-		return false, ErrNoSocket
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
-	defer cancel()
-
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		return false, fmt.Errorf("connect confirmation socket: %w", err)
-	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(c.Timeout))
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return false, fmt.Errorf("send confirmation request: %w", err)
-	}
-
-	var resp Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return false, fmt.Errorf("read confirmation response: %w", err)
-	}
-
-	return resp.Allow, nil
-}
-
-func normalizeUnixSocket(socket string) string {
-	socket = strings.TrimSpace(socket)
-	if socket == "" {
-		return ""
-	}
-	if strings.HasPrefix(socket, "unix://") {
-		return strings.TrimPrefix(socket, "unix://")
-	}
-	return socket
 }
 
 func runQuestion(cmd *exec.Cmd) (bool, error) {

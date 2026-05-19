@@ -1,13 +1,12 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -271,11 +270,10 @@ func TestProxy_AskRule_ConfirmedAllowed(t *testing.T) {
 	docker := mockDocker(t)
 	defer docker.Close()
 
-	socketPath, requests := startConfirmServer(t, true)
+	fake := &fakeConfirmer{allow: true}
 	cfg := &config.Config{
 		Upstream:       docker.URL,
 		Default:        "deny",
-		ConfirmSocket:  "unix://" + socketPath,
 		ConfirmTimeout: 2 * time.Second,
 		Rules: []*config.Rule{{
 			Name:     "askrestart",
@@ -285,7 +283,9 @@ func TestProxy_AskRule_ConfirmedAllowed(t *testing.T) {
 			MatchAny: true,
 		}},
 	}
-	proxy := httptest.NewServer(NewHandler(cfg))
+	handler := NewHandler(cfg)
+	handler.confirmer = fake
+	proxy := httptest.NewServer(handler)
 	defer proxy.Close()
 
 	req, _ := http.NewRequest("POST", proxy.URL+"/containers/prod-app/restart", nil)
@@ -300,7 +300,7 @@ func TestProxy_AskRule_ConfirmedAllowed(t *testing.T) {
 		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, body)
 	}
 
-	confirmReq := <-requests
+	confirmReq := fake.last
 	if confirmReq.Rule != "askrestart" {
 		t.Fatalf("expected confirmation rule askrestart, got %s", confirmReq.Rule)
 	}
@@ -313,11 +313,9 @@ func TestProxy_AskRule_RejectedDenied(t *testing.T) {
 	docker := mockDocker(t)
 	defer docker.Close()
 
-	socketPath, _ := startConfirmServer(t, false)
 	cfg := &config.Config{
 		Upstream:       docker.URL,
 		Default:        "deny",
-		ConfirmSocket:  "unix://" + socketPath,
 		ConfirmTimeout: 2 * time.Second,
 		Rules: []*config.Rule{{
 			Name:     "askrestart",
@@ -327,7 +325,9 @@ func TestProxy_AskRule_RejectedDenied(t *testing.T) {
 			MatchAny: true,
 		}},
 	}
-	proxy := httptest.NewServer(NewHandler(cfg))
+	handler := NewHandler(cfg)
+	handler.confirmer = &fakeConfirmer{allow: false}
+	proxy := httptest.NewServer(handler)
 	defer proxy.Close()
 
 	req, _ := http.NewRequest("POST", proxy.URL+"/containers/prod-app/restart", nil)
@@ -342,7 +342,7 @@ func TestProxy_AskRule_RejectedDenied(t *testing.T) {
 	}
 }
 
-func TestProxy_AskRule_NoSocketDenied(t *testing.T) {
+func TestProxy_AskRule_DialogErrorDenied(t *testing.T) {
 	docker := mockDocker(t)
 	defer docker.Close()
 
@@ -357,7 +357,9 @@ func TestProxy_AskRule_NoSocketDenied(t *testing.T) {
 			MatchAny: true,
 		}},
 	}
-	proxy := httptest.NewServer(NewHandler(cfg))
+	handler := NewHandler(cfg)
+	handler.confirmer = &fakeConfirmer{err: errFakeConfirm}
+	proxy := httptest.NewServer(handler)
 	defer proxy.Close()
 
 	req, _ := http.NewRequest("POST", proxy.URL+"/containers/prod-app/restart", nil)
@@ -497,33 +499,15 @@ func TestProxy_DeleteContainer_Denied(t *testing.T) {
 	}
 }
 
-func startConfirmServer(t *testing.T, allow bool) (string, <-chan confirm.Request) {
-	t.Helper()
+var errFakeConfirm = errBodyTooLarge
 
-	socketPath := filepath.Join(t.TempDir(), "confirm.sock")
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen confirmation socket: %v", err)
-	}
-	t.Cleanup(func() { ln.Close() })
+type fakeConfirmer struct {
+	allow bool
+	err   error
+	last  confirm.Request
+}
 
-	requests := make(chan confirm.Request, 1)
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer conn.Close()
-				var req confirm.Request
-				if err := json.NewDecoder(conn).Decode(&req); err == nil {
-					requests <- req
-				}
-				_ = json.NewEncoder(conn).Encode(confirm.Response{Allow: allow})
-			}(conn)
-		}
-	}()
-
-	return socketPath, requests
+func (f *fakeConfirmer) Ask(_ context.Context, req confirm.Request) (bool, error) {
+	f.last = req
+	return f.allow, f.err
 }

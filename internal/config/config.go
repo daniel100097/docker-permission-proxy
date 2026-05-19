@@ -13,8 +13,7 @@ import (
 type Config struct {
 	Listen         string        // DPP_LISTEN (e.g. "unix:///tmp/proxy.sock" or "tcp://0.0.0.0:2375")
 	Upstream       string        // DPP_UPSTREAM (e.g. "unix:///var/run/docker.sock")
-	Default        string        // DPP_DEFAULT ("deny" or "allow")
-	ConfirmSocket  string        // DPP_CONFIRM_SOCKET (e.g. "unix:///run/user/1000/dpp-confirm.sock")
+	Default        string        // DPP_DEFAULT ("deny", "allow", or "ask")
 	ConfirmTimeout time.Duration // DPP_CONFIRM_TIMEOUT (default: 30s)
 	Rules          []*Rule
 }
@@ -50,12 +49,11 @@ func Parse() (*Config, error) {
 		Listen:         getEnv("DPP_LISTEN", "tcp://127.0.0.1:2375"),
 		Upstream:       getEnv("DPP_UPSTREAM", "unix:///var/run/docker.sock"),
 		Default:        getEnv("DPP_DEFAULT", "deny"),
-		ConfirmSocket:  getEnv("DPP_CONFIRM_SOCKET", ""),
 		ConfirmTimeout: 30 * time.Second,
 	}
 
-	if cfg.Default != "allow" && cfg.Default != "deny" {
-		return nil, fmt.Errorf("DPP_DEFAULT must be \"allow\" or \"deny\", got %q", cfg.Default)
+	if cfg.Default != DecisionAllow && cfg.Default != DecisionDeny && cfg.Default != DecisionAsk {
+		return nil, fmt.Errorf("DPP_DEFAULT must be %q, %q, or %q, got %q", DecisionAllow, DecisionDeny, DecisionAsk, cfg.Default)
 	}
 	if timeout := getEnv("DPP_CONFIRM_TIMEOUT", ""); timeout != "" {
 		parsed, err := time.ParseDuration(timeout)

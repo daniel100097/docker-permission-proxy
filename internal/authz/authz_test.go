@@ -84,21 +84,82 @@ func TestEngine_DefaultAllow_AllowsUnmatchedNonExec(t *testing.T) {
 	}
 }
 
-func TestEngine_DefaultAllow_DoesNotAllowUnknownOrExec(t *testing.T) {
-	cfg := &config.Config{Rules: nil, Default: "allow", Upstream: "unix:///var/run/docker.sock"}
+func TestEngine_DefaultAsk_AsksForUnmatchedNonExec(t *testing.T) {
+	cfg := &config.Config{Rules: nil, Default: "ask", Upstream: "unix:///var/run/docker.sock"}
 	e := NewEngine(cfg)
 
+	class := classifier.Classification{Action: "list", Target: "container"}
+	req := httptest.NewRequest("GET", "/containers/json", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.NeedsConfirmation {
+		t.Fatalf("expected default ask to require confirmation, got: %+v", decision)
+	}
+	if decision.RuleName != "default" {
+		t.Fatalf("expected default rule name, got %s", decision.RuleName)
+	}
+}
+
+func TestEngine_DefaultAllow_DoesNotAllowUnknownOrExec(t *testing.T) {
 	tests := []classifier.Classification{
 		{Action: "unknown", Target: "unknown"},
 		{Action: "exec", Target: "container", ID: "abc123"},
 	}
 
-	for _, class := range tests {
-		req := httptest.NewRequest("POST", "/", nil)
-		decision := e.Authorize(req, class, []byte(`{"User":"1000"}`))
-		if decision.Allowed {
-			t.Errorf("expected deny for %+v with default allow", class)
-		}
+	for _, defaultPolicy := range []string{"allow", "ask"} {
+		t.Run(defaultPolicy, func(t *testing.T) {
+			cfg := &config.Config{Rules: nil, Default: defaultPolicy, Upstream: "unix:///var/run/docker.sock"}
+			e := NewEngine(cfg)
+
+			for _, class := range tests {
+				req := httptest.NewRequest("POST", "/", nil)
+				decision := e.Authorize(req, class, []byte(`{"User":"1000"}`))
+				if decision.Allowed || decision.NeedsConfirmation {
+					t.Errorf("expected deny for %+v with default %s, got %+v", class, defaultPolicy, decision)
+				}
+			}
+		})
+	}
+}
+
+func TestEngine_AskExecRuleAsksForCreateAndFollowup(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:          "askexec",
+		Decision:      config.DecisionAsk,
+		Actions:       map[string]bool{"exec": true},
+		Targets:       map[string]bool{"container": true},
+		MatchAny:      true,
+		ExecUserAllow: map[string]bool{"1000": true},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	createClass := classifier.Classification{Action: "exec", Target: "container", ID: "app"}
+	createReq := httptest.NewRequest("POST", "/containers/app/exec", nil)
+	createDecision := e.Authorize(createReq, createClass, []byte(`{"User":"1000","Cmd":["sh"]}`))
+	if !createDecision.NeedsConfirmation {
+		t.Fatalf("expected exec create to require confirmation, got: %+v", createDecision)
+	}
+
+	e.StoreExecID("exec123", "app")
+	followupClass := classifier.Classification{Action: "exec.start", Target: "container", ID: "exec123"}
+	followupReq := httptest.NewRequest("POST", "/exec/exec123/start", nil)
+	followupDecision := e.Authorize(followupReq, followupClass, nil)
+	if !followupDecision.NeedsConfirmation {
+		t.Fatalf("expected exec followup to require confirmation, got: %+v", followupDecision)
 	}
 }
 
@@ -917,48 +978,6 @@ func TestEngine_RuleDecisionDenyOverridesAllow(t *testing.T) {
 	}
 	if decision.RuleName != "denyrestart" {
 		t.Fatalf("expected denyrestart to decide, got %s", decision.RuleName)
-	}
-}
-
-func TestEngine_AskExecRuleAllowsCachedFollowup(t *testing.T) {
-	rules := []*config.Rule{{
-		Name:          "askexec",
-		Decision:      config.DecisionAsk,
-		Actions:       map[string]bool{"exec": true},
-		Targets:       map[string]bool{"container": true},
-		MatchAny:      true,
-		ExecUserAllow: map[string]bool{"1000": true},
-	}}
-
-	containers := map[string]map[string]interface{}{
-		"app": {
-			"Id":   "appfull",
-			"Name": "/app",
-			"Config": map[string]interface{}{
-				"Image":  "myapp",
-				"Labels": map[string]interface{}{},
-			},
-		},
-	}
-	server := mockDockerServer(containers)
-	defer server.Close()
-
-	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
-	e := newTestEngineWithHTTP(cfg, server.URL)
-
-	createClass := classifier.Classification{Action: "exec", Target: "container", ID: "app"}
-	createReq := httptest.NewRequest("POST", "/containers/app/exec", nil)
-	createDecision := e.Authorize(createReq, createClass, []byte(`{"User":"1000","Cmd":["sh"]}`))
-	if !createDecision.NeedsConfirmation {
-		t.Fatalf("expected exec create to require confirmation, got: %+v", createDecision)
-	}
-
-	e.StoreExecID("exec123", "app")
-	followupClass := classifier.Classification{Action: "exec.start", Target: "container", ID: "exec123"}
-	followupReq := httptest.NewRequest("POST", "/exec/exec123/start", nil)
-	followupDecision := e.Authorize(followupReq, followupClass, nil)
-	if !followupDecision.Allowed || followupDecision.NeedsConfirmation {
-		t.Fatalf("expected cached exec followup to be allowed without another prompt, got: %+v", followupDecision)
 	}
 }
 
