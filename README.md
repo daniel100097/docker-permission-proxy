@@ -368,6 +368,10 @@ request, action, target, and an approximate Docker command such as
 does not support actions, times out, or the notification is rejected/closed, the
 Docker request is denied.
 
+The notification exposes `Approve`, `Approve All Pending`, and `Deny`. `Approve
+All Pending` drains the current confirmation backlog, so a burst of Docker API
+requests does not need one click per request.
+
 The `user: "1000:1000"` setting matters because `/run/user/1000` is normally
 private to UID 1000. Change the UID/GID if your desktop session uses a different
 account. If Docker socket access then fails, add the host Docker socket group

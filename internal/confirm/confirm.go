@@ -33,8 +33,11 @@ type Confirmer interface {
 
 // Desktop asks through a desktop dialog inside the current process environment.
 type Desktop struct {
-	Timeout time.Duration
-	mu      sync.Mutex
+	Timeout   time.Duration
+	promptMu  sync.Mutex
+	stateMu   sync.Mutex
+	pending   int
+	autoAllow bool
 }
 
 // NewDesktop creates a desktop dialog confirmer.
@@ -47,8 +50,18 @@ func NewDesktop(timeout time.Duration) *Desktop {
 
 // Ask sends an actionable desktop notification and returns true only when the user confirms.
 func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if d.beginRequest() {
+		defer d.finishRequest()
+		return true, nil
+	}
+	defer d.finishRequest()
+
+	d.promptMu.Lock()
+	defer d.promptMu.Unlock()
+
+	if d.shouldAutoAllow() {
+		return true, nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), d.Timeout)
 	defer cancel()
@@ -101,12 +114,52 @@ func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
 		case <-ctx.Done():
 			return false, fmt.Errorf("confirmation timed out: %w", ctx.Err())
 		case signal := <-signals:
-			allowed, done := handleNotificationSignal(signal, notificationID)
+			action, done := handleNotificationSignal(signal, notificationID)
 			if done {
-				return allowed, nil
+				switch action {
+				case "approve":
+					return true, nil
+				case "approve_all":
+					d.enableAutoAllow()
+					return true, nil
+				default:
+					return false, nil
+				}
 			}
 		}
 	}
+}
+
+func (d *Desktop) beginRequest() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
+	d.pending++
+	return d.autoAllow
+}
+
+func (d *Desktop) finishRequest() {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
+	if d.pending > 0 {
+		d.pending--
+	}
+	if d.pending == 0 {
+		d.autoAllow = false
+	}
+}
+
+func (d *Desktop) shouldAutoAllow() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.autoAllow
+}
+
+func (d *Desktop) enableAutoAllow() {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	d.autoAllow = true
 }
 
 func notificationCapabilities(obj dbus.BusObject) (map[string]bool, error) {
@@ -122,7 +175,11 @@ func notificationCapabilities(obj dbus.BusObject) (map[string]bool, error) {
 }
 
 func sendNotification(obj dbus.BusObject, req Request, message string, timeout time.Duration) (uint32, error) {
-	actions := []string{"approve", "Approve", "deny", "Deny"}
+	actions := []string{
+		"approve", "Approve",
+		"approve_all", "Approve All Pending",
+		"deny", "Deny",
+	}
 	hints := map[string]dbus.Variant{
 		"resident":  dbus.MakeVariant(true),
 		"transient": dbus.MakeVariant(false),
@@ -155,26 +212,31 @@ func sendNotification(obj dbus.BusObject, req Request, message string, timeout t
 	return id, nil
 }
 
-func handleNotificationSignal(signal *dbus.Signal, notificationID uint32) (bool, bool) {
+func handleNotificationSignal(signal *dbus.Signal, notificationID uint32) (string, bool) {
 	if signal == nil || len(signal.Body) < 1 {
-		return false, false
+		return "", false
 	}
 
 	id, ok := signal.Body[0].(uint32)
 	if !ok || id != notificationID {
-		return false, false
+		return "", false
 	}
 
 	switch signal.Name {
 	case "org.freedesktop.Notifications.ActionInvoked":
 		if len(signal.Body) < 2 {
-			return false, true
+			return "deny", true
 		}
 		action, _ := signal.Body[1].(string)
-		return action == "approve", true
+		switch action {
+		case "approve", "approve_all":
+			return action, true
+		default:
+			return "deny", true
+		}
 	case "org.freedesktop.Notifications.NotificationClosed":
-		return false, true
+		return "deny", true
 	default:
-		return false, false
+		return "", false
 	}
 }
