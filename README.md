@@ -361,9 +361,9 @@ services:
       DPP_RULE_prodask_MATCH_LABEL_env: "prod"
 ```
 
-The image includes `zenity`, and DPP also uses `kdialog` if you add it to a
-custom image. DPP opens a question dialog with the matching rule, Docker API
-request, action, target, and an approximate Docker command such as
+The image includes Debian's `zenity`, and DPP also uses `kdialog` if you add it
+to a custom image. DPP opens one question dialog at a time with the matching
+rule, Docker API request, action, target, and an approximate Docker command such as
 `docker container restart prod-app`. If the dialog command is unavailable, times
 out, or the dialog is rejected, the Docker request is denied.
 

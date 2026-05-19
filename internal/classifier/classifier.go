@@ -76,16 +76,16 @@ func init() {
 
 		// Image operations
 		{method: "GET", pattern: re(vp + `/images/json/?`), action: "list", target: "image", idGroup: -1},
-		{method: "GET", pattern: re(vp + `/images/([^/]+)/json/?`), action: "inspect", target: "image", idGroup: 1},
-		{method: "GET", pattern: re(vp + `/images/([^/]+)/history/?`), action: "image.history", target: "image", idGroup: 1},
+		{method: "GET", pattern: re(vp + `/images/(.+)/json/?`), action: "inspect", target: "image", idGroup: 1},
+		{method: "GET", pattern: re(vp + `/images/(.+)/history/?`), action: "image.history", target: "image", idGroup: 1},
 		{method: "GET", pattern: re(vp + `/images/search/?`), action: "image.search", target: "image", idGroup: -1},
 		{method: "GET", pattern: re(vp + `/images/get/?`), action: "image.save", target: "image", idGroup: -1},
-		{method: "GET", pattern: re(vp + `/images/([^/]+)/get/?`), action: "image.save", target: "image", idGroup: 1},
+		{method: "GET", pattern: re(vp + `/images/(.+)/get/?`), action: "image.save", target: "image", idGroup: 1},
 		{method: "POST", pattern: re(vp + `/images/load/?`), action: "image.load", target: "image", idGroup: -1},
 		{method: "POST", pattern: re(vp + `/images/create/?`), action: "pull", target: "image", idGroup: -1},
-		{method: "POST", pattern: re(vp + `/images/([^/]+)/push/?`), action: "push", target: "image", idGroup: 1},
-		{method: "POST", pattern: re(vp + `/images/([^/]+)/tag/?`), action: "tag", target: "image", idGroup: 1},
-		{method: "DELETE", pattern: re(vp + `/images/([^/]+)/?`), action: "remove", target: "image", idGroup: 1},
+		{method: "POST", pattern: re(vp + `/images/(.+)/push/?`), action: "push", target: "image", idGroup: 1},
+		{method: "POST", pattern: re(vp + `/images/(.+)/tag/?`), action: "tag", target: "image", idGroup: 1},
+		{method: "DELETE", pattern: re(vp + `/images/(.+)/?`), action: "remove", target: "image", idGroup: 1},
 		{method: "POST", pattern: re(vp + `/images/prune/?`), action: "prune", target: "image", idGroup: -1},
 		{method: "POST", pattern: re(vp + `/build/?`), action: "build", target: "image", idGroup: -1},
 		{method: "POST", pattern: re(vp + `/commit/?`), action: "commit", target: "image", idGroup: -1},
@@ -165,7 +165,7 @@ func init() {
 		{method: "DELETE", pattern: re(vp + `/plugins/([^/]+)/?`), action: "plugin.remove", target: "plugin", idGroup: 1},
 
 		// Distribution
-		{method: "GET", pattern: re(vp + `/distribution/([^/]+)/json/?`), action: "distribution.inspect", target: "distribution", idGroup: 1},
+		{method: "GET", pattern: re(vp + `/distribution/(.+)/json/?`), action: "distribution.inspect", target: "distribution", idGroup: 1},
 
 		// Session (interactive session for build — requires explicit rule)
 		{method: "POST", pattern: re(vp + `/session/?`), action: "session", target: "build", idGroup: -1},

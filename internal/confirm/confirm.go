@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -32,19 +33,23 @@ type Confirmer interface {
 // Desktop asks through a desktop dialog inside the current process environment.
 type Desktop struct {
 	Timeout time.Duration
+	mu      sync.Mutex
 }
 
 // NewDesktop creates a desktop dialog confirmer.
-func NewDesktop(timeout time.Duration) Desktop {
+func NewDesktop(timeout time.Duration) *Desktop {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return Desktop{Timeout: timeout}
+	return &Desktop{Timeout: timeout}
 }
 
 // Ask opens kdialog or zenity and returns true only when the user confirms.
-func (d Desktop) Ask(ctx context.Context, req Request) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, d.Timeout)
+func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), d.Timeout)
 	defer cancel()
 
 	message := req.Message
@@ -56,7 +61,7 @@ func (d Desktop) Ask(ctx context.Context, req Request) (bool, error) {
 		return runQuestion(exec.CommandContext(ctx, path, "--title", "Docker Permission Proxy", "--yesno", message))
 	}
 	if path, ok := lookup("zenity"); ok {
-		return runQuestion(exec.CommandContext(ctx, path, "--question", "--title=Docker Permission Proxy", "--width=640", "--text="+message))
+		return runQuestion(exec.CommandContext(ctx, path, "--question", "--title", "Docker Permission Proxy", "--width", "640", "--text", message))
 	}
 
 	return false, errors.New("neither kdialog nor zenity was found in PATH")
