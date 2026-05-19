@@ -62,9 +62,11 @@ func TestParse_Defaults(t *testing.T) {
 func TestParse_GlobalConfig(t *testing.T) {
 	clearAllDPPEnvs(t)
 	setEnvs(t, map[string]string{
-		"DPP_LISTEN":   "unix:///tmp/test.sock",
-		"DPP_UPSTREAM": "unix:///custom/docker.sock",
-		"DPP_DEFAULT":  "allow",
+		"DPP_LISTEN":          "unix:///tmp/test.sock",
+		"DPP_UPSTREAM":        "unix:///custom/docker.sock",
+		"DPP_DEFAULT":         "allow",
+		"DPP_CONFIRM_SOCKET":  "unix:///tmp/dpp-confirm.sock",
+		"DPP_CONFIRM_TIMEOUT": "5s",
 	})
 
 	cfg, err := Parse()
@@ -81,6 +83,12 @@ func TestParse_GlobalConfig(t *testing.T) {
 	if cfg.Default != "allow" {
 		t.Errorf("expected allow, got %s", cfg.Default)
 	}
+	if cfg.ConfirmSocket != "unix:///tmp/dpp-confirm.sock" {
+		t.Errorf("expected confirmation socket, got %s", cfg.ConfirmSocket)
+	}
+	if cfg.ConfirmTimeout.String() != "5s" {
+		t.Errorf("expected confirmation timeout 5s, got %s", cfg.ConfirmTimeout)
+	}
 }
 
 func TestParse_InvalidDefault(t *testing.T) {
@@ -91,6 +99,17 @@ func TestParse_InvalidDefault(t *testing.T) {
 
 	if _, err := Parse(); err == nil {
 		t.Fatal("expected invalid DPP_DEFAULT to return error")
+	}
+}
+
+func TestParse_InvalidConfirmTimeout(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_CONFIRM_TIMEOUT": "soon",
+	})
+
+	if _, err := Parse(); err == nil {
+		t.Fatal("expected invalid DPP_CONFIRM_TIMEOUT to return error")
 	}
 }
 
@@ -115,6 +134,9 @@ func TestParse_SingleRule(t *testing.T) {
 	if r.Name != "mytest" {
 		t.Errorf("expected rule name mytest, got %s", r.Name)
 	}
+	if r.Decision != DecisionAllow {
+		t.Errorf("expected default rule decision allow, got %s", r.Decision)
+	}
 	if !r.HasAction("exec") {
 		t.Error("expected rule to have exec action")
 	}
@@ -129,6 +151,38 @@ func TestParse_SingleRule(t *testing.T) {
 	}
 	if !r.ExecUserAllow["1000"] || !r.ExecUserAllow["1001"] {
 		t.Errorf("expected exec user allow 1000,1001, got %v", r.ExecUserAllow)
+	}
+}
+
+func TestParse_RuleDecisionAsk(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_RULE_confirm_ACTION":   "restart",
+		"DPP_RULE_confirm_DECISION": "ask",
+		"DPP_RULE_confirm_MATCH":    "*",
+	})
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(cfg.Rules))
+	}
+	if cfg.Rules[0].Decision != DecisionAsk {
+		t.Fatalf("expected ask decision, got %s", cfg.Rules[0].Decision)
+	}
+}
+
+func TestParse_InvalidRuleDecision_ReturnsError(t *testing.T) {
+	clearAllDPPEnvs(t)
+	setEnvs(t, map[string]string{
+		"DPP_RULE_bad_ACTION":   "restart",
+		"DPP_RULE_bad_DECISION": "maybe",
+	})
+
+	if _, err := Parse(); err == nil {
+		t.Fatal("expected invalid DECISION to return error")
 	}
 }
 
@@ -374,6 +428,7 @@ func TestParseContainerLabelRules(t *testing.T) {
 func TestParseContainerLabelRules_AllSupportedFields(t *testing.T) {
 	rules, err := ParseContainerLabelRules(map[string]string{
 		"dpp.rule.shell.action":           "exec",
+		"dpp.rule.shell.decision":         "ask",
 		"dpp.rule.shell.target":           "container",
 		"dpp.rule.shell.match":            "*",
 		"dpp.rule.shell.match-name":       "worker-*",
@@ -397,6 +452,9 @@ func TestParseContainerLabelRules_AllSupportedFields(t *testing.T) {
 	}
 	if !r.HasAction("exec") {
 		t.Errorf("expected exec action, got %v", r.Actions)
+	}
+	if r.Decision != DecisionAsk {
+		t.Errorf("expected ask decision, got %s", r.Decision)
 	}
 	if !r.HasTarget("container") {
 		t.Errorf("expected container target, got %v", r.Targets)

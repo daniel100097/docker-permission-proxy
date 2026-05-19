@@ -862,6 +862,106 @@ func TestEngine_MultipleRulesORed(t *testing.T) {
 	}
 }
 
+func TestEngine_RuleDecisionAskRequiresConfirmation(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:     "confirmrestart",
+		Decision: config.DecisionAsk,
+		Actions:  map[string]bool{"restart": true},
+		Targets:  map[string]bool{"container": true},
+		MatchAny: true,
+	}}
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: "unix:///var/run/docker.sock"}
+	e := NewEngine(cfg)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if !decision.NeedsConfirmation {
+		t.Fatalf("expected confirmation decision, got allowed=%v reason=%s", decision.Allowed, decision.Reason)
+	}
+	if decision.Allowed {
+		t.Fatal("ask decision should not be allowed until the proxy confirms it")
+	}
+	if decision.RuleName != "confirmrestart" {
+		t.Fatalf("expected rule name confirmrestart, got %s", decision.RuleName)
+	}
+}
+
+func TestEngine_RuleDecisionDenyOverridesAllow(t *testing.T) {
+	rules := []*config.Rule{
+		{
+			Name:     "allowrestart",
+			Decision: config.DecisionAllow,
+			Actions:  map[string]bool{"restart": true},
+			Targets:  map[string]bool{"container": true},
+			MatchAny: true,
+		},
+		{
+			Name:     "denyrestart",
+			Decision: config.DecisionDeny,
+			Actions:  map[string]bool{"restart": true},
+			Targets:  map[string]bool{"container": true},
+			MatchAny: true,
+		},
+	}
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: "unix:///var/run/docker.sock"}
+	e := NewEngine(cfg)
+
+	class := classifier.Classification{Action: "restart", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/restart", nil)
+	decision := e.Authorize(req, class, nil)
+	if decision.Allowed || decision.NeedsConfirmation {
+		t.Fatalf("expected deny to override allow, got allowed=%v confirm=%v", decision.Allowed, decision.NeedsConfirmation)
+	}
+	if decision.RuleName != "denyrestart" {
+		t.Fatalf("expected denyrestart to decide, got %s", decision.RuleName)
+	}
+}
+
+func TestEngine_AskExecRuleAllowsCachedFollowup(t *testing.T) {
+	rules := []*config.Rule{{
+		Name:          "askexec",
+		Decision:      config.DecisionAsk,
+		Actions:       map[string]bool{"exec": true},
+		Targets:       map[string]bool{"container": true},
+		MatchAny:      true,
+		ExecUserAllow: map[string]bool{"1000": true},
+	}}
+
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: rules, Default: "deny", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	createClass := classifier.Classification{Action: "exec", Target: "container", ID: "app"}
+	createReq := httptest.NewRequest("POST", "/containers/app/exec", nil)
+	createDecision := e.Authorize(createReq, createClass, []byte(`{"User":"1000","Cmd":["sh"]}`))
+	if !createDecision.NeedsConfirmation {
+		t.Fatalf("expected exec create to require confirmation, got: %+v", createDecision)
+	}
+
+	e.StoreExecID("exec123", "app")
+	followupClass := classifier.Classification{Action: "exec.start", Target: "container", ID: "exec123"}
+	followupReq := httptest.NewRequest("POST", "/exec/exec123/start", nil)
+	followupDecision := e.Authorize(followupReq, followupClass, nil)
+	if !followupDecision.Allowed || followupDecision.NeedsConfirmation {
+		t.Fatalf("expected cached exec followup to be allowed without another prompt, got: %+v", followupDecision)
+	}
+}
+
 func TestEngine_ActionMismatch_Denied(t *testing.T) {
 	rules := []*config.Rule{{
 		Name:     "readonly",

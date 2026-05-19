@@ -6,13 +6,25 @@ services:
   docker-proxy:
     build: .
     restart: unless-stopped
+    # Required for direct desktop dialogs because /run/user/1000 is private to
+    # the logged-in desktop user. Change if your desktop UID/GID differs.
+    user: "1000:1000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Direct desktop confirmation support for Wayland/GNOME/KDE.
+      - /run/user/1000:/run/user/1000
+      # X11 fallback for desktops where zenity uses DISPLAY.
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
     environment:
       # Listener configuration
       DPP_LISTEN: "tcp://0.0.0.0:2375"
       DPP_UPSTREAM: "unix:///var/run/docker.sock"
       DPP_DEFAULT: "deny"
+      DPP_CONFIRM_TIMEOUT: "30s"
+      XDG_RUNTIME_DIR: "/run/user/1000"
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus"
+      DISPLAY: "${DISPLAY:-}"
+      WAYLAND_DISPLAY: "${WAYLAND_DISPLAY:-wayland-0}"
 
       # Rule: Allow exec on containers labeled team=dev, restrict to specific users
       DPP_RULE_devexec_ACTION: "exec"
@@ -22,6 +34,11 @@ services:
       # Rule: Allow start/stop/restart/kill on containers labeled env=prod
       DPP_RULE_opsctl_ACTION: "start,stop,restart,kill"
       DPP_RULE_opsctl_MATCH_LABEL_env: "prod"
+
+      # Rule: Ask on the desktop before restarting prod containers
+      DPP_RULE_prodask_ACTION: "restart"
+      DPP_RULE_prodask_DECISION: "ask"
+      DPP_RULE_prodask_MATCH_LABEL_env: "prod"
 
       # Rule: Allow container creation only for images from our registry
       DPP_RULE_cicreate_ACTION: "create"
@@ -33,5 +50,7 @@ services:
       DPP_RULE_readall_MATCH: "*"
     ports:
       - "127.0.0.1:2375:2375"
-    # Run as non-root but with access to docker socket via group
-    # user: "1000:999"  # Uncomment and adjust GID to match docker group
+    # Add the Docker socket group if needed. Replace with:
+    # stat -c '%g' /var/run/docker.sock
+    # group_add:
+    #   - "999"

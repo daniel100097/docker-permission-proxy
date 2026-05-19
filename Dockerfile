@@ -7,7 +7,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /dsp ./cmd/dsp
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates && \
+RUN apk add --no-cache ca-certificates zenity && \
     addgroup -S dpp && adduser -S dpp -G dpp
 COPY --from=builder /dsp /usr/local/bin/dsp
 USER dpp

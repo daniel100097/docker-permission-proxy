@@ -11,6 +11,8 @@ It is intended for cases where a tool needs limited Docker API access, but a raw
 ## Features
 
 - Rule-based access control via `DPP_RULE_*` environment variables
+- Per-rule decisions: `allow`, `deny`, or desktop-confirmed `ask`
+- Desktop confirmation dialogs through `kdialog` or `zenity`
 - Traefik-style rule naming: `DPP_RULE_<name>_<field>`
 - Container selectors for labels, name, image, and ID prefix
 - Container-local rules declared directly on Docker container labels
@@ -75,6 +77,8 @@ docker run --rm \
 | `DPP_LISTEN` | `tcp://127.0.0.1:2375` | Proxy listener. Supports `tcp://host:port`, `host:port`, or `unix:///path`. |
 | `DPP_UPSTREAM` | `unix:///var/run/docker.sock` | Upstream Docker daemon endpoint. Usually `unix:///var/run/docker.sock`. |
 | `DPP_DEFAULT` | `deny` | Default policy for recognized, non-exec requests without a matching rule. Must be `deny` or `allow`. |
+| `DPP_CONFIRM_SOCKET` | unset | Optional Unix socket for an external `DECISION=ask` helper. If unset, DPP opens `kdialog` or `zenity` directly in the proxy container. |
+| `DPP_CONFIRM_TIMEOUT` | `30s` | Maximum time to wait for the dialog or external helper response. Uses Go duration syntax. |
 
 Unknown Docker API endpoints are always denied, even with `DPP_DEFAULT=allow`.
 Exec requests are never allowed by default policy; they require an explicit exec
@@ -101,8 +105,9 @@ Important parser details:
 - Rule names currently cannot contain underscores. Use `devexec`, not `dev_exec`.
 - Unknown fields are startup errors, so typos fail closed.
 - `ACTION` is required. A rule without `ACTION` is ignored.
+- `DECISION` defaults to `allow`. Set it to `deny` to block a matching request or `ask` to require desktop confirmation.
 - `TARGET` defaults to `container` if omitted.
-- Rules are ORed: any matching rule allows the request.
+- Among evaluated matching rules, decisions are combined fail-closed: `deny` wins over `ask`, and `ask` wins over `allow`.
 - Selectors in one rule are ANDed, except `MATCH=*`, which is an explicit match-all selector.
 - Avoid combining `MATCH=*` with more specific selectors; `MATCH=*` makes the rule unscoped.
 
@@ -115,6 +120,7 @@ when the container owner should opt in to specific operations for that container
 | Field | Description |
 |-------|-------------|
 | `ACTION` | Required CSV of action names. |
+| `DECISION` | `allow`, `deny`, or `ask`. Defaults to `allow`. |
 | `TARGET` | CSV of target names. Defaults to `container`. |
 | `MATCH` | Set to `*` to match any target for the action and target. |
 | `MATCH_LABEL_<key>` | Match a container label value with a glob. Label key case is preserved. |
@@ -152,6 +158,7 @@ Supported label fields map to the environment rule fields:
 | Label field | Environment field |
 |-------------|-------------------|
 | `action` | `ACTION` |
+| `decision` | `DECISION` |
 | `target` | `TARGET` |
 | `match` | `MATCH` |
 | `match-label.<key>` | `MATCH_LABEL_<key>` |
@@ -331,6 +338,53 @@ DPP_RULE_prodctl_ACTION=start,stop,restart
 DPP_RULE_prodctl_TARGET=container
 DPP_RULE_prodctl_MATCH_LABEL_env=prod
 ```
+
+### Ask Before Restarting Production Containers
+
+For the main proxy container to open the dialog directly, run it as the logged-in
+desktop user and mount that user's desktop runtime directory:
+
+```yaml
+services:
+  docker-proxy:
+    image: ghcr.io/daniel100097/docker-permission-proxy:main
+    user: "1000:1000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/user/1000:/run/user/1000
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+    environment:
+      XDG_RUNTIME_DIR: "/run/user/1000"
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus"
+      DISPLAY: "${DISPLAY:-}"
+      WAYLAND_DISPLAY: "${WAYLAND_DISPLAY:-wayland-0}"
+      DPP_RULE_prodask_ACTION: "restart"
+      DPP_RULE_prodask_DECISION: "ask"
+      DPP_RULE_prodask_MATCH_LABEL_env: "prod"
+```
+
+The image includes `zenity`. If `kdialog` or `zenity` is available in the
+container, DPP opens a question dialog with the matching rule, Docker API
+request, action, target, and an approximate Docker command such as
+`docker container restart prod-app`. If the dialog command is unavailable, times
+out, or the dialog is rejected, the Docker request is denied.
+
+The `user: "1000:1000"` setting matters because `/run/user/1000` is normally
+private to UID 1000. Change the UID/GID if your desktop session uses a different
+account. If Docker socket access then fails, add the host Docker socket group
+with `group_add`.
+
+If you prefer an external helper instead of mounting the desktop session into the
+main proxy container, set `DPP_CONFIRM_SOCKET`. The socket protocol is one
+newline-terminated JSON request and one JSON response:
+
+```json
+{"id":"abc","rule":"prodask","action":"restart","target":"container","resource_id":"prod-app","method":"POST","path":"/containers/prod-app/restart","command":"docker container restart prod-app","message":"..."}
+{"allow":true}
+```
+
+This makes it possible to replace `cmd/dpp-confirm` with another host daemon if
+you want a different desktop integration or audit flow.
 
 ### Container-Local Restart Opt-In
 

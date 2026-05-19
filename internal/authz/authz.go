@@ -49,8 +49,12 @@ func NewEngine(cfg *config.Config) *Engine {
 
 // Decision represents an authorization decision.
 type Decision struct {
-	Allowed bool
-	Reason  string
+	Allowed           bool
+	NeedsConfirmation bool
+	Reason            string
+	RuleName          string
+	RuleDecision      string
+	Container         *ContainerMeta
 }
 
 // Authorize makes an authorization decision for the given request.
@@ -102,23 +106,22 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		_ = json.Unmarshal(body, &bodyMap)
 	}
 
-	for _, rule := range matchingRules {
-		if ruleNeedsContainerMeta(rule, class) {
-			continue
-		}
-		if e.ruleAllows(rule, nil, bodyMap, class, isExecFollowup) {
-			return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
+	needsMeta := e.needsContainerMeta(matchingRules, class)
+
+	if !needsMeta {
+		if decision, decided := e.applyRuleDecisions(matchingRules, nil, bodyMap, class, isExecFollowup); decided {
+			return decision
 		}
 	}
 
-	if len(matchingRules) == 0 && class.Action != "exec" && e.defaultPolicy == "allow" {
+	if !needsMeta && len(matchingRules) == 0 && class.Action != "exec" && e.defaultPolicy == "allow" {
 		return Decision{Allowed: true, Reason: "default policy: allow"}
 	}
 
 	// Get container metadata only when container selectors need it.
 	var meta *ContainerMeta
 	var labelRuleErr error
-	if e.needsContainerMeta(matchingRules, class) {
+	if needsMeta {
 		var err error
 		meta, err = e.getContainerMeta(class.ID)
 		if err != nil {
@@ -147,11 +150,8 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 		return Decision{Allowed: false, Reason: fmt.Sprintf("no rules for action=%s target=%s", class.Action, class.Target)}
 	}
 
-	// Evaluate rules (ORed)
-	for _, rule := range matchingRules {
-		if e.ruleAllows(rule, meta, bodyMap, class, isExecFollowup) {
-			return Decision{Allowed: true, Reason: fmt.Sprintf("rule %q matched", rule.Name)}
-		}
+	if decision, decided := e.applyRuleDecisions(matchingRules, meta, bodyMap, class, isExecFollowup); decided {
+		return decision
 	}
 
 	if labelRuleErr != nil {
@@ -159,6 +159,55 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 	}
 
 	return Decision{Allowed: false, Reason: "no rule matched"}
+}
+
+func (e *Engine) applyRuleDecisions(rules []*config.Rule, meta *ContainerMeta, body map[string]interface{}, class classifier.Classification, isExecFollowup bool) (Decision, bool) {
+	var ask *Decision
+	var allow *Decision
+
+	for _, rule := range rules {
+		if !e.ruleAllows(rule, meta, body, class, isExecFollowup) {
+			continue
+		}
+
+		decision := Decision{
+			RuleName:     rule.Name,
+			RuleDecision: rule.Decision,
+			Container:    meta,
+		}
+
+		switch rule.Decision {
+		case config.DecisionDeny:
+			decision.Allowed = false
+			decision.Reason = fmt.Sprintf("rule %q denied", rule.Name)
+			return decision, true
+		case config.DecisionAsk:
+			if isExecFollowup {
+				decision.Allowed = true
+				decision.Reason = fmt.Sprintf("rule %q matched confirmed exec", rule.Name)
+				return decision, true
+			}
+			if ask == nil {
+				decision.NeedsConfirmation = true
+				decision.Reason = fmt.Sprintf("rule %q asks for confirmation", rule.Name)
+				ask = &decision
+			}
+		default:
+			if allow == nil {
+				decision.Allowed = true
+				decision.Reason = fmt.Sprintf("rule %q matched", rule.Name)
+				allow = &decision
+			}
+		}
+	}
+
+	if ask != nil {
+		return *ask, true
+	}
+	if allow != nil {
+		return *allow, true
+	}
+	return Decision{}, false
 }
 
 func (e *Engine) needsContainerMeta(rules []*config.Rule, class classifier.Classification) bool {

@@ -27,8 +27,8 @@ func main() {
 	}
 
 	// Log configuration
-	log.Printf("CONFIG listen=%s upstream=%s default=%s rules=%d",
-		cfg.Listen, cfg.Upstream, cfg.Default, len(cfg.Rules))
+	log.Printf("CONFIG listen=%s upstream=%s default=%s confirmSocket=%q confirmTimeout=%s rules=%d",
+		cfg.Listen, cfg.Upstream, cfg.Default, cfg.ConfirmSocket, cfg.ConfirmTimeout, len(cfg.Rules))
 	for _, r := range cfg.Rules {
 		actions := make([]string, 0, len(r.Actions))
 		for a := range r.Actions {
@@ -38,8 +38,9 @@ func main() {
 		for t := range r.Targets {
 			targets = append(targets, t)
 		}
-		log.Printf("  RULE %s: actions=[%s] targets=[%s] matchAny=%v labels=%v name=%q image=%q execUser=%q execUserAllow=%v",
+		log.Printf("  RULE %s: decision=%s actions=[%s] targets=[%s] matchAny=%v labels=%v name=%q image=%q execUser=%q execUserAllow=%v",
 			r.Name,
+			r.Decision,
 			strings.Join(actions, ","),
 			strings.Join(targets, ","),
 			r.MatchAny,

@@ -3,13 +3,17 @@ package proxy
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielvolz/docker-permission-proxy/internal/config"
+	"github.com/danielvolz/docker-permission-proxy/internal/confirm"
 )
 
 // mockDocker creates a fake Docker daemon HTTP server.
@@ -116,17 +120,17 @@ func setupTestProxy(t *testing.T, dockerServer *httptest.Server) *httptest.Serve
 
 	// Set env vars for rules
 	envs := map[string]string{
-		"DPP_LISTEN":                       "tcp://127.0.0.1:0",
-		"DPP_UPSTREAM":                     dockerServer.URL,
-		"DPP_DEFAULT":                      "deny",
-		"DPP_RULE_readall_ACTION":          "list,inspect,logs",
-		"DPP_RULE_readall_TARGET":          "container,image,network,volume",
-		"DPP_RULE_readall_MATCH":           "*",
-		"DPP_RULE_devexec_ACTION":          "exec",
+		"DPP_LISTEN":                        "tcp://127.0.0.1:0",
+		"DPP_UPSTREAM":                      dockerServer.URL,
+		"DPP_DEFAULT":                       "deny",
+		"DPP_RULE_readall_ACTION":           "list,inspect,logs",
+		"DPP_RULE_readall_TARGET":           "container,image,network,volume",
+		"DPP_RULE_readall_MATCH":            "*",
+		"DPP_RULE_devexec_ACTION":           "exec",
 		"DPP_RULE_devexec_MATCH_LABEL_team": "dev",
-		"DPP_RULE_devexec_EXEC_USER_ALLOW": "1000,deploy",
-		"DPP_RULE_opsctl_ACTION":           "start,stop,restart,kill",
-		"DPP_RULE_opsctl_MATCH_LABEL_env":  "prod",
+		"DPP_RULE_devexec_EXEC_USER_ALLOW":  "1000,deploy",
+		"DPP_RULE_opsctl_ACTION":            "start,stop,restart,kill",
+		"DPP_RULE_opsctl_MATCH_LABEL_env":   "prod",
 	}
 	for k, v := range envs {
 		os.Setenv(k, v)
@@ -263,6 +267,111 @@ func TestProxy_StartContainer_AllowedByLabel(t *testing.T) {
 	}
 }
 
+func TestProxy_AskRule_ConfirmedAllowed(t *testing.T) {
+	docker := mockDocker(t)
+	defer docker.Close()
+
+	socketPath, requests := startConfirmServer(t, true)
+	cfg := &config.Config{
+		Upstream:       docker.URL,
+		Default:        "deny",
+		ConfirmSocket:  "unix://" + socketPath,
+		ConfirmTimeout: 2 * time.Second,
+		Rules: []*config.Rule{{
+			Name:     "askrestart",
+			Decision: config.DecisionAsk,
+			Actions:  map[string]bool{"restart": true},
+			Targets:  map[string]bool{"container": true},
+			MatchAny: true,
+		}},
+	}
+	proxy := httptest.NewServer(NewHandler(cfg))
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("POST", proxy.URL+"/containers/prod-app/restart", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, body)
+	}
+
+	confirmReq := <-requests
+	if confirmReq.Rule != "askrestart" {
+		t.Fatalf("expected confirmation rule askrestart, got %s", confirmReq.Rule)
+	}
+	if !strings.Contains(confirmReq.Message, "docker container restart prod-app") {
+		t.Fatalf("confirmation message did not contain command, got: %s", confirmReq.Message)
+	}
+}
+
+func TestProxy_AskRule_RejectedDenied(t *testing.T) {
+	docker := mockDocker(t)
+	defer docker.Close()
+
+	socketPath, _ := startConfirmServer(t, false)
+	cfg := &config.Config{
+		Upstream:       docker.URL,
+		Default:        "deny",
+		ConfirmSocket:  "unix://" + socketPath,
+		ConfirmTimeout: 2 * time.Second,
+		Rules: []*config.Rule{{
+			Name:     "askrestart",
+			Decision: config.DecisionAsk,
+			Actions:  map[string]bool{"restart": true},
+			Targets:  map[string]bool{"container": true},
+			MatchAny: true,
+		}},
+	}
+	proxy := httptest.NewServer(NewHandler(cfg))
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("POST", proxy.URL+"/containers/prod-app/restart", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestProxy_AskRule_NoSocketDenied(t *testing.T) {
+	docker := mockDocker(t)
+	defer docker.Close()
+
+	cfg := &config.Config{
+		Upstream: docker.URL,
+		Default:  "deny",
+		Rules: []*config.Rule{{
+			Name:     "askrestart",
+			Decision: config.DecisionAsk,
+			Actions:  map[string]bool{"restart": true},
+			Targets:  map[string]bool{"container": true},
+			MatchAny: true,
+		}},
+	}
+	proxy := httptest.NewServer(NewHandler(cfg))
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("POST", proxy.URL+"/containers/prod-app/restart", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
 func TestProxy_ExecCreate_Allowed(t *testing.T) {
 	docker := mockDocker(t)
 	defer docker.Close()
@@ -386,4 +495,35 @@ func TestProxy_DeleteContainer_Denied(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
 	}
+}
+
+func startConfirmServer(t *testing.T, allow bool) (string, <-chan confirm.Request) {
+	t.Helper()
+
+	socketPath := filepath.Join(t.TempDir(), "confirm.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen confirmation socket: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	requests := make(chan confirm.Request, 1)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				var req confirm.Request
+				if err := json.NewDecoder(conn).Decode(&req); err == nil {
+					requests <- req
+				}
+				_ = json.NewEncoder(conn).Encode(confirm.Response{Allow: allow})
+			}(conn)
+		}
+	}()
+
+	return socketPath, requests
 }

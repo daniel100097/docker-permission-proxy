@@ -6,44 +6,66 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Config holds the parsed proxy configuration.
 type Config struct {
-	Listen   string // DPP_LISTEN (e.g. "unix:///tmp/proxy.sock" or "tcp://0.0.0.0:2375")
-	Upstream string // DPP_UPSTREAM (e.g. "unix:///var/run/docker.sock")
-	Default  string // DPP_DEFAULT ("deny" or "allow")
-	Rules    []*Rule
+	Listen         string        // DPP_LISTEN (e.g. "unix:///tmp/proxy.sock" or "tcp://0.0.0.0:2375")
+	Upstream       string        // DPP_UPSTREAM (e.g. "unix:///var/run/docker.sock")
+	Default        string        // DPP_DEFAULT ("deny" or "allow")
+	ConfirmSocket  string        // DPP_CONFIRM_SOCKET (e.g. "unix:///run/user/1000/dpp-confirm.sock")
+	ConfirmTimeout time.Duration // DPP_CONFIRM_TIMEOUT (default: 30s)
+	Rules          []*Rule
 }
 
 // Rule represents a single permission rule parsed from DPP_RULE_<name>_* env vars.
 type Rule struct {
-	Name           string
-	Actions        map[string]bool // set of allowed verbs
-	Targets        map[string]bool // set of resource types (default: container)
-	MatchAny       bool            // MATCH=* means match everything
-	MatchLabels    map[string]string // label key → value/glob
-	MatchName      string          // glob pattern for container name
-	MatchImage     string          // glob pattern for image
-	MatchID        string          // sha prefix
-	ExecUser       string          // required exact user for exec
-	ExecUserAllow  map[string]bool // whitelist of allowed users for exec
+	Name          string
+	Decision      string            // allow, deny, or ask (default: allow)
+	Actions       map[string]bool   // set of Docker action names
+	Targets       map[string]bool   // set of resource types (default: container)
+	MatchAny      bool              // MATCH=* means match everything
+	MatchLabels   map[string]string // label key → value/glob
+	MatchName     string            // glob pattern for container name
+	MatchImage    string            // glob pattern for image
+	MatchID       string            // sha prefix
+	ExecUser      string            // required exact user for exec
+	ExecUserAllow map[string]bool   // whitelist of allowed users for exec
 }
 
 var ruleEnvRe = regexp.MustCompile(`^DPP_RULE_([^_]+)_(.+)$`)
 
 const ruleLabelPrefix = "dpp.rule."
 
+const (
+	DecisionAllow = "allow"
+	DecisionDeny  = "deny"
+	DecisionAsk   = "ask"
+)
+
 // Parse reads environment variables and returns a Config.
 func Parse() (*Config, error) {
 	cfg := &Config{
-		Listen:   getEnv("DPP_LISTEN", "tcp://127.0.0.1:2375"),
-		Upstream: getEnv("DPP_UPSTREAM", "unix:///var/run/docker.sock"),
-		Default:  getEnv("DPP_DEFAULT", "deny"),
+		Listen:         getEnv("DPP_LISTEN", "tcp://127.0.0.1:2375"),
+		Upstream:       getEnv("DPP_UPSTREAM", "unix:///var/run/docker.sock"),
+		Default:        getEnv("DPP_DEFAULT", "deny"),
+		ConfirmSocket:  getEnv("DPP_CONFIRM_SOCKET", ""),
+		ConfirmTimeout: 30 * time.Second,
 	}
 
 	if cfg.Default != "allow" && cfg.Default != "deny" {
 		return nil, fmt.Errorf("DPP_DEFAULT must be \"allow\" or \"deny\", got %q", cfg.Default)
+	}
+	if timeout := getEnv("DPP_CONFIRM_TIMEOUT", ""); timeout != "" {
+		parsed, err := time.ParseDuration(timeout)
+		if err != nil {
+			return nil, fmt.Errorf("DPP_CONFIRM_TIMEOUT must be a Go duration like \"30s\", got %q", timeout)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("DPP_CONFIRM_TIMEOUT must be greater than zero, got %q", timeout)
+		}
+		cfg.ConfirmTimeout = parsed
 	}
 
 	builders := map[string]*ruleBuilder{}
@@ -123,6 +145,8 @@ func containerLabelRuleField(field string) (string, bool) {
 	switch lower {
 	case "action":
 		return "ACTION", true
+	case "decision":
+		return "DECISION", true
 	case "target":
 		return "TARGET", true
 	case "match":
@@ -167,6 +191,7 @@ func buildRules(builders map[string]*ruleBuilder) ([]*Rule, error) {
 
 type ruleBuilder struct {
 	name          string
+	decision      string
 	actions       string
 	targets       string
 	matchAny      bool
@@ -185,6 +210,8 @@ func (rb *ruleBuilder) set(field, value string) {
 	switch {
 	case upper == "ACTION":
 		rb.actions = value
+	case upper == "DECISION":
+		rb.decision = value
 	case upper == "TARGET":
 		rb.targets = value
 	case upper == "MATCH" && value == "*":
@@ -222,16 +249,27 @@ func (rb *ruleBuilder) build() (*Rule, error) {
 		return nil, nil
 	}
 
+	decision := strings.ToLower(strings.TrimSpace(rb.decision))
+	if decision == "" {
+		decision = DecisionAllow
+	}
+	switch decision {
+	case DecisionAllow, DecisionDeny, DecisionAsk:
+	default:
+		return nil, fmt.Errorf("DECISION must be %q, %q, or %q, got %q", DecisionAllow, DecisionDeny, DecisionAsk, rb.decision)
+	}
+
 	rule := &Rule{
-		Name:        rb.name,
-		Actions:     parseCSVSet(rb.actions),
-		Targets:     parseCSVSet(rb.targets),
-		MatchAny:    rb.matchAny,
-		MatchLabels: rb.matchLabels,
-		MatchName:   rb.matchName,
-		MatchImage:  rb.matchImage,
-		MatchID:     rb.matchID,
-		ExecUser:    rb.execUser,
+		Name:          rb.name,
+		Decision:      decision,
+		Actions:       parseCSVSet(rb.actions),
+		Targets:       parseCSVSet(rb.targets),
+		MatchAny:      rb.matchAny,
+		MatchLabels:   rb.matchLabels,
+		MatchName:     rb.matchName,
+		MatchImage:    rb.matchImage,
+		MatchID:       rb.matchID,
+		ExecUser:      rb.execUser,
 		ExecUserAllow: parseCSVSet(rb.execUserAllow),
 	}
 
