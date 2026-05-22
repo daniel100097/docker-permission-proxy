@@ -144,6 +144,14 @@ func (e *Engine) Authorize(req *http.Request, class classifier.Classification, b
 			return Decision{Allowed: false, Reason: fmt.Sprintf("invalid container label rule: %v", labelRuleErr)}
 		}
 		if class.Action == "exec" {
+			if e.defaultPolicy == config.DecisionAsk {
+				if !isExecFollowup && !e.defaultExecUserSafe(meta, bodyMap) {
+					return Decision{Allowed: false, Reason: "default ask exec requires a non-root user"}
+				}
+				decision, _ := e.defaultDecision()
+				decision.Container = meta
+				return decision
+			}
 			return Decision{Allowed: false, Reason: "exec requires explicit rule"}
 		}
 		if decision, decided := e.defaultDecision(); decided {
@@ -221,6 +229,23 @@ func (e *Engine) applyRuleDecisions(rules []*config.Rule, meta *ContainerMeta, b
 		return *allow, true
 	}
 	return Decision{}, false
+}
+
+func (e *Engine) defaultExecUserSafe(meta *ContainerMeta, body map[string]interface{}) bool {
+	if body == nil {
+		return false
+	}
+
+	user, _ := body["User"].(string)
+	if user == "" {
+		if meta == nil || meta.DefaultUser == "" {
+			return false
+		}
+		user = meta.DefaultUser
+	}
+
+	userPart, groupPart := splitUserGroup(user)
+	return !isRootUserOrGroup(userPart, groupPart)
 }
 
 func (e *Engine) needsContainerMeta(rules []*config.Rule, class classifier.Classification) bool {
@@ -381,16 +406,10 @@ func (e *Engine) checkExecUser(rule *config.Rule, meta *ContainerMeta, body map[
 		user = meta.DefaultUser
 	}
 
-	// Parse user:group format. Docker accepts both names and numeric IDs.
-	userPart := user
-	groupPart := ""
-	if idx := strings.IndexByte(user, ':'); idx >= 0 {
-		userPart = user[:idx]
-		groupPart = user[idx+1:]
-	}
+	userPart, groupPart := splitUserGroup(user)
 
 	// Always block root user/group regardless of rules (UID/GID 0 or name "root").
-	if userPart == "0" || userPart == "root" || groupPart == "0" || groupPart == "root" {
+	if isRootUserOrGroup(userPart, groupPart) {
 		return false
 	}
 
@@ -406,6 +425,17 @@ func (e *Engine) checkExecUser(rule *config.Rule, meta *ContainerMeta, body map[
 
 	// No exec user config means exec is denied (safer default)
 	return false
+}
+
+func splitUserGroup(user string) (string, string) {
+	if idx := strings.IndexByte(user, ':'); idx >= 0 {
+		return user[:idx], user[idx+1:]
+	}
+	return user, ""
+}
+
+func isRootUserOrGroup(userPart, groupPart string) bool {
+	return userPart == "0" || userPart == "root" || groupPart == "0" || groupPart == "root"
 }
 
 // getContainerMeta fetches or caches container inspect data.

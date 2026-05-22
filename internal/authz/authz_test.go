@@ -105,19 +105,77 @@ func TestEngine_DefaultAllow_DoesNotAllowUnknownOrExec(t *testing.T) {
 		{Action: "exec", Target: "container", ID: "abc123"},
 	}
 
-	for _, defaultPolicy := range []string{"allow", "ask"} {
-		t.Run(defaultPolicy, func(t *testing.T) {
-			cfg := &config.Config{Rules: nil, Default: defaultPolicy, Upstream: "unix:///var/run/docker.sock"}
-			e := NewEngine(cfg)
+	cfg := &config.Config{Rules: nil, Default: "allow", Upstream: "unix:///var/run/docker.sock"}
+	e := NewEngine(cfg)
 
-			for _, class := range tests {
-				req := httptest.NewRequest("POST", "/", nil)
-				decision := e.Authorize(req, class, []byte(`{"User":"1000"}`))
-				if decision.Allowed || decision.NeedsConfirmation {
-					t.Errorf("expected deny for %+v with default %s, got %+v", class, defaultPolicy, decision)
-				}
-			}
-		})
+	for _, class := range tests {
+		req := httptest.NewRequest("POST", "/", nil)
+		decision := e.Authorize(req, class, []byte(`{"User":"1000"}`))
+		if decision.Allowed || decision.NeedsConfirmation {
+			t.Errorf("expected deny for %+v with default allow, got %+v", class, decision)
+		}
+	}
+}
+
+func TestEngine_DefaultAsk_AsksForExecWithSafeUser(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: nil, Default: "ask", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	class := classifier.Classification{Action: "exec", Target: "container", ID: "app"}
+	req := httptest.NewRequest("POST", "/containers/app/exec", nil)
+	decision := e.Authorize(req, class, []byte(`{"User":"1000","Cmd":["sh"]}`))
+	if !decision.NeedsConfirmation {
+		t.Fatalf("expected default ask exec to require confirmation, got: %+v", decision)
+	}
+	if decision.RuleName != "default" {
+		t.Fatalf("expected default rule name, got %s", decision.RuleName)
+	}
+}
+
+func TestEngine_DefaultAsk_DeniesUnsafeExecUser(t *testing.T) {
+	containers := map[string]map[string]interface{}{
+		"app": {
+			"Id":   "appfull",
+			"Name": "/app",
+			"Config": map[string]interface{}{
+				"Image":  "myapp",
+				"Labels": map[string]interface{}{},
+			},
+		},
+	}
+	server := mockDockerServer(containers)
+	defer server.Close()
+
+	cfg := &config.Config{Rules: nil, Default: "ask", Upstream: server.URL}
+	e := newTestEngineWithHTTP(cfg, server.URL)
+
+	tests := []string{
+		`{"User":"root","Cmd":["sh"]}`,
+		`{"User":"0","Cmd":["sh"]}`,
+		`{"User":"1000:0","Cmd":["sh"]}`,
+		`{"Cmd":["sh"]}`,
+	}
+
+	for _, body := range tests {
+		class := classifier.Classification{Action: "exec", Target: "container", ID: "app"}
+		req := httptest.NewRequest("POST", "/containers/app/exec", nil)
+		decision := e.Authorize(req, class, []byte(body))
+		if decision.Allowed || decision.NeedsConfirmation {
+			t.Fatalf("expected unsafe default ask exec to deny for %s, got: %+v", body, decision)
+		}
 	}
 }
 

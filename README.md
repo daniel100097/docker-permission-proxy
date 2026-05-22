@@ -81,8 +81,9 @@ docker run --rm \
 
 Unknown Docker API endpoints are always denied, even with `DPP_DEFAULT=allow` or
 `DPP_DEFAULT=ask`.
-Exec requests are never allowed by default policy; they require an explicit exec
-rule with user restrictions.
+Exec requests are never allowed by `DPP_DEFAULT=allow`. With `DPP_DEFAULT=ask`,
+exec requests can be confirmed interactively, but root users/groups and implicit
+root execs are still denied before prompting.
 
 ### Rule Grammar
 
@@ -277,7 +278,8 @@ proxy only to trusted networks, or put authentication/TLS in front of it.
 Exec is intentionally stricter than other actions:
 
 - `exec` always requires an explicit matching rule.
-- `DPP_DEFAULT=allow` and `DPP_DEFAULT=ask` do not allow exec.
+- `DPP_DEFAULT=allow` does not allow exec.
+- `DPP_DEFAULT=ask` can ask for exec, but it still rejects root users/groups and missing users that would inherit root.
 - Missing or empty Docker exec `User` inherits the container's configured
   `Config.User` from inspect only when that value is explicit and non-root.
 - If the container has no configured default user, missing or empty Docker exec
