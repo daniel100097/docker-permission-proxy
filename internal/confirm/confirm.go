@@ -33,11 +33,11 @@ type Confirmer interface {
 
 // Desktop asks through a desktop dialog inside the current process environment.
 type Desktop struct {
-	Timeout   time.Duration
-	promptMu  sync.Mutex
-	stateMu   sync.Mutex
-	pending   int
-	autoAllow bool
+	Timeout           time.Duration
+	AutoApproveWindow time.Duration
+	promptMu          sync.Mutex
+	stateMu           sync.Mutex
+	autoApproveUntil  time.Time
 }
 
 // NewDesktop creates a desktop dialog confirmer.
@@ -45,21 +45,19 @@ func NewDesktop(timeout time.Duration) *Desktop {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Desktop{Timeout: timeout}
+	return &Desktop{Timeout: timeout, AutoApproveWindow: 30 * time.Second}
 }
 
 // Ask sends an actionable desktop notification and returns true only when the user confirms.
 func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
-	if d.beginRequest() {
-		defer d.finishRequest()
+	if d.shouldAutoApprove() {
 		return true, nil
 	}
-	defer d.finishRequest()
 
 	d.promptMu.Lock()
 	defer d.promptMu.Unlock()
 
-	if d.shouldAutoAllow() {
+	if d.shouldAutoApprove() {
 		return true, nil
 	}
 
@@ -119,8 +117,8 @@ func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
 				switch action {
 				case "approve":
 					return true, nil
-				case "approve_all":
-					d.enableAutoAllow()
+				case "approve_next_30":
+					d.enableAutoApprove()
 					return true, nil
 				default:
 					return false, nil
@@ -130,36 +128,20 @@ func (d *Desktop) Ask(_ context.Context, req Request) (bool, error) {
 	}
 }
 
-func (d *Desktop) beginRequest() bool {
+func (d *Desktop) shouldAutoApprove() bool {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
-
-	d.pending++
-	return d.autoAllow
+	return time.Now().Before(d.autoApproveUntil)
 }
 
-func (d *Desktop) finishRequest() {
+func (d *Desktop) enableAutoApprove() {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
-
-	if d.pending > 0 {
-		d.pending--
+	window := d.AutoApproveWindow
+	if window <= 0 {
+		window = 30 * time.Second
 	}
-	if d.pending == 0 {
-		d.autoAllow = false
-	}
-}
-
-func (d *Desktop) shouldAutoAllow() bool {
-	d.stateMu.Lock()
-	defer d.stateMu.Unlock()
-	return d.autoAllow
-}
-
-func (d *Desktop) enableAutoAllow() {
-	d.stateMu.Lock()
-	defer d.stateMu.Unlock()
-	d.autoAllow = true
+	d.autoApproveUntil = time.Now().Add(window)
 }
 
 func notificationCapabilities(obj dbus.BusObject) (map[string]bool, error) {
@@ -177,7 +159,7 @@ func notificationCapabilities(obj dbus.BusObject) (map[string]bool, error) {
 func sendNotification(obj dbus.BusObject, req Request, message string, timeout time.Duration) (uint32, error) {
 	actions := []string{
 		"approve", "Approve",
-		"approve_all", "Approve All Pending",
+		"approve_next_30", "Approve All 30s",
 		"deny", "Deny",
 	}
 	hints := map[string]dbus.Variant{
@@ -229,7 +211,7 @@ func handleNotificationSignal(signal *dbus.Signal, notificationID uint32) (strin
 		}
 		action, _ := signal.Body[1].(string)
 		switch action {
-		case "approve", "approve_all":
+		case "approve", "approve_next_30":
 			return action, true
 		default:
 			return "deny", true

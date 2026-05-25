@@ -422,20 +422,30 @@ func (h *Handler) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Bidirectional copy — wait for both goroutines
-	done := make(chan struct{}, 2)
+	// Bidirectional copy. When one direction reaches EOF, only close that
+	// direction's write side so the opposite stream can still drain.
+	type copyDirection int
+	const (
+		clientToUpstream copyDirection = iota
+		upstreamToClient
+	)
+
+	done := make(chan copyDirection, 2)
 	go func() {
 		io.Copy(upstreamConn, clientConn)
-		done <- struct{}{}
+		closeWrite(upstreamConn)
+		done <- clientToUpstream
 	}()
 	go func() {
 		io.Copy(clientConn, upstreamConn)
-		done <- struct{}{}
+		closeWrite(clientConn)
+		done <- upstreamToClient
 	}()
-	<-done
-	// Close connections to unblock the other goroutine
-	clientConn.Close()
-	upstreamConn.Close()
+
+	if <-done == upstreamToClient {
+		clientConn.Close()
+		upstreamConn.Close()
+	}
 	<-done
 }
 
@@ -462,6 +472,15 @@ func isUpgradeAllowed(action string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func closeWrite(conn net.Conn) {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -437,6 +438,81 @@ func TestProxy_ExecCreate_DeniedEmptyUser(t *testing.T) {
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestProxy_UpgradeDrainsOutputAfterClientHalfClose(t *testing.T) {
+	docker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/containers/dev-app/json" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"Id":   "abc123full",
+				"Name": "/dev-app",
+				"Config": map[string]interface{}{
+					"Image":  "myapp:latest",
+					"Labels": map[string]interface{}{},
+				},
+			})
+			return
+		}
+		if r.URL.Path != "/containers/dev-app/attach" {
+			http.NotFound(w, r)
+			return
+		}
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("test server does not support hijacking")
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Fatalf("failed to hijack upstream connection: %v", err)
+		}
+		defer conn.Close()
+
+		_, _ = conn.Write([]byte("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"))
+		_, _ = conn.Write([]byte("before final output\n"))
+		time.Sleep(50 * time.Millisecond)
+		_, _ = conn.Write([]byte("after final output\n"))
+	}))
+	defer docker.Close()
+
+	cfg := &config.Config{Upstream: docker.URL, Default: "allow"}
+	handler := NewHandler(cfg)
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(proxy.URL, "http://"))
+	if err != nil {
+		t.Fatalf("failed to connect to proxy: %v", err)
+	}
+	defer conn.Close()
+
+	req := strings.Join([]string{
+		"POST /containers/dev-app/attach?stream=1&stdout=1&stderr=1 HTTP/1.1",
+		"Host: proxy",
+		"Connection: Upgrade",
+		"Upgrade: tcp",
+		"Content-Length: 0",
+		"",
+		"",
+	}, "\r\n")
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("failed to write upgrade request: %v", err)
+	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		if err := tcpConn.CloseWrite(); err != nil {
+			t.Fatalf("failed to half-close client write side: %v", err)
+		}
+	}
+
+	data, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("failed to read upgraded stream: %v", err)
+	}
+	output := string(data)
+	if !strings.Contains(output, "before final output") || !strings.Contains(output, "after final output") {
+		t.Fatalf("proxy truncated upgraded output: %q", output)
 	}
 }
 
